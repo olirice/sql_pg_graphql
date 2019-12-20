@@ -59,8 +59,6 @@
         
             <li><a class="toctree-l3" href="#installation">Installation</a></li>
         
-            <li><a class="toctree-l3" href="#quickstart">Quickstart</a></li>
-        
         </ul>
     
 
@@ -69,7 +67,42 @@
           
             <li class="toctree-l1">
 		
-    <a class="" href="specification/">Specification</a>
+    <a class="" href="quickstart/">Quickstart</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="target_audience/">Target Audience</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="schema_reflection/">Schema Reflection</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="queries/">Queries</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="mutations/">Mutations</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="performance/">Performance</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="philosophy/">Philosophy</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="contributors/">Contributors</a>
 	    </li>
           
         </ul>
@@ -113,54 +146,26 @@
 </a>
 </p>
 
-<p>pg_graphql adds GraphQL support to PostgreSQL.</p>
-<p>It allows you to serve GraphQL queries directly from your database can convert
-any database schema into a GraphQL schema.</p>
-<p>pg_graphql is suitable for processing sanitized, syntactically correct, GraphQL operations.</p>
-<p><strong>Documentation</strong>: https://olirice.github.io/pg_graphql/</p>
+<p>pg_graphql adds <a href="https://graphql.org/learn/">GraphQL</a> support to <a href="https://www.postgresql.org/">PostgreSQL</a>.</p>
+<p>It gives postgres the ability to describe its schema as a GraphQL API and performantly serve requests against that API. pg_graphql is a foundational utilty for building blazingly fast GraphQL webservers in any programming language.</p>
+<p>A python reference implementation is coming soon at <a href="https://github/olirice/archetype">archetype</a>.</p>
+<p>pg_graphql is suitable for processing sanitized, syntactically correct, GraphQL operations. Under no circumstances should unsanitized input be accepted.</p>
+<p><strong>Documentation</strong>: <a href="https://olirice.github.io/pg_graphql/">https://olirice.github.io/pg_graphql/</a></p>
 <p><strong>Requirements</strong>: PostgresQL 9.6+</p>
 <h2 id="installation">Installation</h2>
-<p>pg_graphql is written in SQL and PL/pgSQL. Install it by adding <code>pg_graphql.sql</code>, located in the root directory
-of https://github.com/olirice/pg_graphql/, to your SQL migrations.</p>
-<p>Alternatively, if you are a python 3.6+ developer:</p>
-<p>Install pg_graphql into your environment</p>
+<p>pg_graphql is written in SQL and PL/pgSQL. Install it by adding <a href="https://github.com/olirice/pg_graphql/blob/master/pg_graphql.sql">pg_graphql.sql</a> to your migrations or pasting it to your <code>psql</code> prompt.</p>
+<p>Alternatively, if you are a python 3.6+ developer, you can install the development kit and install pg_graphql using its CLI.</p>
 <div class="codehilite"><pre><span></span>$ pip install pg_graphql
 $ pg_graphql install -c &lt;database_connection&gt;
 </pre></div>
 
 
-<hr />
-<h2 id="quickstart">Quickstart</h2>
-<p>For this example we'll create simple database schema, and query it using GraphQL.</p>
-<div class="codehilite"><pre><span></span><span class="k">CREATE</span> <span class="k">TABLE</span> <span class="n">account</span> <span class="p">(</span>
-    <span class="n">id</span> <span class="nb">SERIAL</span> <span class="k">PRIMARY</span> <span class="k">KEY</span><span class="p">,</span>
-    <span class="n">name</span> <span class="nb">text</span> <span class="k">not</span> <span class="k">null</span><span class="p">,</span>
-    <span class="n">created_at</span> <span class="k">timestamp</span> <span class="k">not</span> <span class="k">null</span> <span class="k">default</span> <span class="n">now</span><span class="p">()</span>
-<span class="p">);</span>
-
-<span class="k">CREATE</span> <span class="k">TABLE</span> <span class="n">blog_post</span> <span class="p">(</span>
-    <span class="n">id</span> <span class="nb">SERIAL</span> <span class="k">PRIMARY</span> <span class="k">KEY</span><span class="p">,</span>
-    <span class="n">title</span> <span class="nb">text</span> <span class="k">not</span> <span class="k">null</span><span class="p">,</span>
-    <span class="n">body</span> <span class="nb">text</span><span class="p">,</span>
-    <span class="n">author_id</span> <span class="k">references</span> <span class="n">account</span><span class="p">(</span><span class="n">id</span><span class="p">),</span>
-    <span class="n">created_at</span> <span class="k">timestamp</span> <span class="k">not</span> <span class="k">null</span> <span class="k">default</span> <span class="n">now</span><span class="p">()</span>
-<span class="p">);</span>
-
-<span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">account</span> <span class="p">(</span><span class="n">id</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span> <span class="k">VALUES</span>
-<span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="s1">&#39;Oliver&#39;</span><span class="p">),</span>
-<span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="s1">&#39;Buddy&#39;</span><span class="p">);</span>
-
-<span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">blog_post</span> <span class="p">(</span><span class="n">id</span><span class="p">,</span> <span class="n">owner_id</span><span class="p">,</span> <span class="n">title</span><span class="p">)</span> <span class="k">VALUES</span>
-<span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="s1">&#39;A GraphQL to SQL Webserver for every Language&#39;</span><span class="p">),</span>
-<span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="s1">&#39;Sanitize all the things!&#39;</span><span class="p">),</span>
-<span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">2</span><span class="p">.</span> <span class="s1">&#39;To Bite or not to Bite&#39;</span><span class="p">);</span>
+<p>The install can be berified by checking that the <code>gql</code> schema has been created.</p>
+<div class="codehilite"><pre><span></span><span class="k">select</span> <span class="k">exists</span> <span class="p">(</span><span class="k">select</span> <span class="o">*</span> <span class="k">from</span> <span class="n">pg_catalog</span><span class="p">.</span><span class="n">pg_namespace</span> <span class="k">where</span> <span class="n">nspname</span> <span class="o">=</span> <span class="s1">&#39;gql&#39;</span><span class="p">);</span>
 </pre></div>
 
 
-<p>We now have 2 tables, connected by a foreign key relationshp describing user accounts and
-their associated blog posts.</p>
-<p>Next, check out the <a href="specification/">specification</a> for more examples of how SQL schemas
-translated to GraphQL schemas.</p>
+<p>Next, check out the <a href="quickstart/">quickstart</a> guide for a small end-to-end example.</p>
 <p align="center">&mdash;&mdash;  &mdash;&mdash;</p>
 
 <p align="center"><i>pg_graphql is <a href="https://github.com/olirice/pg_graphql/blob/master/LICENSE.md">BSD licensed</a> code.</i></p>
@@ -171,7 +176,7 @@ translated to GraphQL schemas.</p>
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="specification/" class="btn btn-neutral float-right" title="Specification">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="quickstart/" class="btn btn-neutral float-right" title="Quickstart">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
     </div>
@@ -199,7 +204,7 @@ translated to GraphQL schemas.</p>
       
       
       
-        <span style="margin-left: 15px"><a href="specification/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="quickstart/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>
@@ -212,5 +217,5 @@ translated to GraphQL schemas.</p>
 
 <!--
 MkDocs version : 1.0.4
-Build Date UTC : 2019-12-20 11:37:49
+Build Date UTC : 2019-12-20 17:45:47
 -->
