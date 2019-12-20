@@ -17,7 +17,7 @@ DEV_REQUIRES = [
 
 setup(
     name="pg_graphql",
-    version="0.1.1",
+    version="0.1.2",
     description="pg_graphql: GraphQL support for PostgreSQL",
     author="Oliver Rice",
     author_email="oliver@oliverrice.com",
@@ -32,6 +32,6 @@ setup(
     package_dir={"": "src/main/python"},
     entry_points={"console_scripts": ["pg_graphql=pg_graphql.cli:main"]},
     install_requires=["flupy"],
-    extras_require={"dev": DEV_REQUIRES, "nvim": ["neovim", "python-language-server"],},
+    extras_require={"dev": DEV_REQUIRES, "nvim": ["neovim", "python-language-server"]},
     include_package_data=True,
 )
