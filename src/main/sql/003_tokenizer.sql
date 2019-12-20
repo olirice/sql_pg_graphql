@@ -46,12 +46,10 @@ as $BODY$
     begin
         loop
             exit when payload = '';
-            
+           
             maybe_tok = substring(payload from '^\s+');
             if maybe_tok is not null then
                 payload := substring(payload, character_length(maybe_tok)+1, 99999);
-                -- Whitespace is not a used token
-                maybe_tok = substring(payload from '^[_A-Za-z][_0-9A-Za-z]*');
                 continue;
             end if;
 
@@ -63,7 +61,7 @@ as $BODY$
             end if;
 
             first_char := substring(payload, 1, 1);
-
+            
             if first_char = '{' then
                 payload := substring(payload, 2, 99999);
                 tokens := tokens || ('BRACE_L', '{')::gql.token;
@@ -128,32 +126,27 @@ as $BODY$
                 continue;
             end if;
 
-
             if first_char = ',' then
                 payload := substring(payload, 2, 99999);
                 continue;
             end if;
 
-            cur_token := (
-                select coalesce(
-                    case
-                        when first_char = '[' then ('BRACKET_L', ']')::gql.token
-                        when first_char = ']' then ('BRACKET_R', '[')::gql.token
-                        when first_char = '!' then ('BANG', '!')::gql.token
-                        when first_char = '$' then ('DOLLAR', '$')::gql.token
-                        when first_char = '&' then ('AMP', '&')::gql.token
-                        when first_char = '=' then ('EQUALS', '=')::gql.token
-                        when first_char = '@' then ('AT', '@')::gql.token
-                        when first_char = '|' then ('PIPE', '|')::gql.token
-                        --when first_char = ',' then ('COMMA', ',')::gql.token
-                        when substring(payload, 1, 3) = '...' then ('SPREAD', '...')::gql.token
-                        else null::gql.token
-                    end::gql.token,
-                    ('ERROR', substring(payload from '^.*'))::gql.token
-                )
+            cur_token := coalesce(case
+                    when first_char = '[' then ('BRACKET_L', ']')::gql.token
+                    when first_char = ']' then ('BRACKET_R', '[')::gql.token
+                    when first_char = '!' then ('BANG', '!')::gql.token
+                    when first_char = '$' then ('DOLLAR', '$')::gql.token
+                    when first_char = '&' then ('AMP', '&')::gql.token
+                    when first_char = '=' then ('EQUALS', '=')::gql.token
+                    when first_char = '@' then ('AT', '@')::gql.token
+                    when first_char = '|' then ('PIPE', '|')::gql.token
+                    when substring(payload, 1, 3) = '...' then ('SPREAD', '...')::gql.token
+                    else null::gql.token
+                end::gql.token,
+                ('ERROR', substring(payload from '^.*'))::gql.token
             );
-            payload := substring(payload, character_length(cur_token.content)+1, 99999);
 
+            payload := substring(payload, character_length(cur_token.content)+1, 99999);
             tokens := tokens || cur_token;
         end loop;
         return tokens;

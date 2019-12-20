@@ -1,0 +1,9 @@
+include *.sql
+include LICENSE
+prune src/test
+prune src/main/python/pg_graphql.egg-info
+exclude src/main/python/pg_graphql.egg-info
+global-exclude *.md
+global-exclude __pycache__
+global-exclude pg_graphql.egg-info
+

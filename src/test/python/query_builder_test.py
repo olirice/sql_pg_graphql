@@ -64,7 +64,7 @@ def test_execute_sql(session):
 
 def test_operation(session, build_tables):
     query = """
-        select gql.execute_operation($$
+        select gql.execute($$
             query { account(id: 1) { name my_id: id, created_at} }
         $$);
     """
@@ -78,7 +78,7 @@ def test_operation(session, build_tables):
 
 def test_nested_operation(session, build_tables):
     query = """
-        select gql.execute_operation($$
+        select gql.execute($$
             query {
                 account(id: 1) {
                     name
@@ -97,7 +97,7 @@ def test_nested_operation(session, build_tables):
 
 def test_nested_operation_join_correctness(session, build_tables):
     query = """
-        select gql.execute_operation($$
+        select gql.execute($$
             query {
                 account(id: 1) {
                     name
@@ -145,7 +145,7 @@ def test_builder_speed(session, build_tables, benchmark):
 
 def _query_integration(session):
     query = """
-        select gql.execute_operation($$
+        select gql.execute($$
             query {
                 account(id: 1) {
                     name

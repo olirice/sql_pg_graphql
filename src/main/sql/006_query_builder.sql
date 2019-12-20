@@ -186,10 +186,10 @@ as $BODY$
 $BODY$;
 
 
-create or replace function gql.execute_operation(graphql_query text) returns jsonb as
+create or replace function gql.execute(operation text) returns jsonb as
 $$
     declare
-        tokens gql.token[] := gql.tokenize_operation(graphql_query);
+        tokens gql.token[] := gql.tokenize_operation(operation);
         ast jsonb := gql.parse_operation(tokens);
         sql_query text := gql.sqlize_field(ast, parent_block_name := null);
     begin
