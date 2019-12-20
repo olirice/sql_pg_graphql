@@ -1,0 +1,15 @@
+site_name: pg_graphql
+site_description: GraphQL support for Postgresql.
+
+theme:
+    name: 'readthedocs'
+
+repo_name: olirice/graphql
+repo_url: https://github.com/olirice/pg_graphql
+
+nav:
+    - Introduction: 'index.md'
+    - Specification: 'specification.md'
+
+markdown_extensions:
+  - codehilite
