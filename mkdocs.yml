@@ -9,7 +9,12 @@ repo_url: https://github.com/olirice/pg_graphql
 
 nav:
     - Introduction: 'index.md'
-    - Specification: 'specification.md'
+    - Quickstart: 'quickstart.md'
+    - Schema Reflection: 'schema_reflection.md'
+    - Queries: 'queries.md'
+    - Mutations: 'mutations.md'
+    - Performance: 'performance.md'
+    - Contributors: 'contributors.md'
 
 markdown_extensions:
   - codehilite
