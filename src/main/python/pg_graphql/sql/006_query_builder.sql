@@ -28,30 +28,20 @@ $$ language sql immutable returns null on null input;
 
 
 create or replace function gql.field_to_name(field jsonb) returns text as
-$$ with res as (select (field ->> 'name')::text)
-	select
-		case
-			when (select * from res) <> 'null' then (select * from res)
-			else null
-		end
+$$ select (field ->> 'name')::text;
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.field_to_alias(field jsonb) returns text as
-$$ with res as (select (field ->> 'alias')::text)
-	select
-		case
-			when (select * from res) <> 'null' then (select * from res)
-			else null
-		end
+$$ select (field ->> 'alias')::text;
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.field_to_args(field jsonb) returns jsonb as
-$$ select jsonb_path_query(field, '$.args');
+$$ select (field ->> 'args')::jsonb;
 $$ language sql immutable returns null on null input;
 
 
 create or replace function gql.field_to_fields(field jsonb) returns jsonb as
-$$ select jsonb_path_query(field, '$.fields');
+$$ select (field ->> 'fields')::jsonb;
 $$ language sql immutable returns null on null input;
 
 -- Convert Selection Attributes to SQL Clauses
@@ -76,19 +66,12 @@ $$ language sql immutable returns null on null input;
 
 create or replace function gql.requires_subquery(field jsonb) returns bool as
 $$ select
-    case
-        when gql.field_to_name(field) like '%_collection_by_%_to_%' then true
-        when gql.field_to_name(field) like '%_by_%_to_%' then true
-        else false
-    end
+    (gql.field_to_name(field) like '%_collection_by_%_to_%')
+    or (gql.field_to_name(field) like '%_by_%_to_%');
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.requires_array(field jsonb) returns bool as
-$$ select
-    case
-        when gql.field_to_name(field) like '%_collection_by_%_to_%' then true
-        else false
-    end
+$$ select gql.field_to_name(field) like '%_collection_by_%_to_%';
 $$ language sql immutable returns null on null input;
 
 
