@@ -17,7 +17,7 @@ DEV_REQUIRES = [
 
 setup(
     name="pg_graphql",
-    version="0.1.2",
+    version="0.1.3",
     description="pg_graphql: GraphQL support for PostgreSQL",
     author="Oliver Rice",
     author_email="oliver@oliverrice.com",
