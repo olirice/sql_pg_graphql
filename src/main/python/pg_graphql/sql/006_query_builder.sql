@@ -117,10 +117,6 @@ $$
         subfield_sql text;
     begin
     
-    if array_length(subfields, 1) = 0 then
-        return null;
-    end if;
-
     for subfield in select unnest(subfields) loop
         subfield_name := coalesce(
             gql.field_to_alias(subfield),
@@ -131,7 +127,9 @@ $$
     end loop;
     
     -- Remove trailing comma
-    response := substring(response, 1, character_length(response)-1);
+    if subfield is not null then
+        response := substring(response, 1, character_length(response)-1);
+    end if;
     response := response || ')';
 
     return response;
@@ -169,7 +167,7 @@ as $BODY$
     raise notice 'Edges %', edges;
     node := (select b from jsonb_array_elements(gql.field_to_fields(edges)) abc(b) where (b ->> 'name') = 'node'); 
     raise notice 'Node %', node;
-    selector_clause := gql.sqlize_to_selector_clause(node, parent_block_name);
+    selector_clause := gql.sqlize_to_selector_clause(node, block_name);
 
     return format($query$
             (
@@ -219,7 +217,7 @@ as $BODY$
         filter_clause text := gql.sqlize_to_filter_clause(field);
         _alias text := gql.field_to_alias(field);
         join_clause text := gql.sqlize_to_join_clause(field, parent_block_name);
-        selector_clause text := gql.sqlize_to_selector_clause(field, block_name);
+        selector_clause text := gql.sqlize_to_selector_clause(field, parent_block_name);
         requires_subquery bool := gql.requires_subquery(field, parent_block_name);
         requires_array bool := gql.requires_array(field);
     begin
@@ -227,6 +225,12 @@ as $BODY$
     -- Basic field 
     if not requires_subquery then
         return field_name;
+    end if;
+    
+    if field_name like '%_by_%' then
+        selector_clause := gql.sqlize_to_selector_clause(field, block_name);
+    else
+        selector_clause := gql.sqlize_to_selector_clause(field, block_name);
     end if;
 
     -- Query 1 (Entrypoint 1) 

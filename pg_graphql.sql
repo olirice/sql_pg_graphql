@@ -128,8 +128,8 @@ $$ language sql stable returns null on null input;
 
 
 create or replace view gql.table_info as
-    select tab.table_schema,
-        tab.table_name,
+    select tab.table_schema::text,
+        tab.table_name::text,
         gql.to_primary_key_cols(tab.table_schema, tab.table_name) pkey_cols
     from information_schema.tables tab
     where tab.table_schema not in ('pg_catalog','information_schema','gql')
@@ -151,52 +151,68 @@ create or replace view gql.column_info as
     order by table_name,
         ordinal_position;
 
+create type gql.cardinality as enum ('ONE', 'MANY');
 
-create or replace view gql.relationship_info as with constraint_cols as
-				(-- Aggregate columns for each constraint into an array
- select table_schema::text,
-						table_name::text,
-						constraint_name::text,
-						array_agg(column_name::text) column_names
-					from information_schema.constraint_column_usage
-					group by table_schema,
-						table_name,
-						constraint_name),
-	directional as
-				(-- List foreign keys with their local + foreign columns
- select tc.constraint_name,
-						tc.table_schema,
-						tc.table_name local_table,
-						array_agg(kcu.column_name) local_columns,
-						ccu.table_name as foreign_table,
-						ccu.column_names as foreign_columns
-					from information_schema.table_constraints as tc
-					join information_schema.key_column_usage as kcu on tc.constraint_name = kcu.constraint_name
-					and tc.table_schema = kcu.table_schema
-					join constraint_cols as ccu on ccu.constraint_name = tc.constraint_name
-					and ccu.table_schema = tc.table_schema
-					where tc.constraint_type = 'FOREIGN KEY'
-					group by tc.constraint_name,
-						tc.table_schema,
-						tc.table_name,
-						ccu.table_schema,
-						ccu.table_name,
-						ccu.column_names)
-select *
-from directional
-union all
-select 'reverse_' || constraint_name,
-	table_schema,
-	foreign_table as local_table,
-	foreign_columns as local_columns,
-	local_table as foreign_table,
-	local_columns as foreign_columns
-from directional;
+create or replace view gql.relationship_info as
+    with constraint_cols as (
+        select
+            table_schema::text,
+            table_name::text,
+            constraint_name::text,
+            array_agg(column_name::text) column_names
+        from information_schema.constraint_column_usage
+        group by table_schema,
+            table_name,
+            constraint_name
+    ),
+	directional as (
+        select 
+            tc.constraint_name::text,
+            tc.table_schema::text,
+            tc.table_name::text local_table,
+            array_agg(kcu.column_name) local_columns,
+            'MANY'::gql.cardinality as local_cardinality,
+            ccu.table_name::text as foreign_table,
+            ccu.column_names::text[] as foreign_columns,
+            'ONE'::gql.cardinality as foreign_cardinality
+        from
+            information_schema.table_constraints as tc
+        join
+            information_schema.key_column_usage as kcu
+            on tc.constraint_name = kcu.constraint_name
+            and tc.table_schema = kcu.table_schema
+        join constraint_cols as ccu
+            on ccu.constraint_name = tc.constraint_name
+            and ccu.table_schema = tc.table_schema
+        where
+            tc.constraint_type = 'FOREIGN KEY'
+        group by
+            tc.constraint_name,
+            tc.table_schema,
+            tc.table_name,
+            ccu.table_schema,
+            ccu.table_name,
+            ccu.column_names
+    )
+    select *
+    from
+        directional
+    union all
+    select
+        'reverse_' || constraint_name,
+	    table_schema,
+	    foreign_table as local_table,
+	    foreign_columns as local_columns,
+        foreign_cardinality as local_cardinality,
+	    local_table as foreign_table,
+	    local_columns as foreign_columns,
+        local_cardinality as foreign_cardinality
+    from
+        directional;
 
 
 
-
-create or replace function gql.to_data_type(_table_schema text, _table_name text, _column_name text) returns text as $$
+create or replace function gql.to_gql_type(_table_schema text, _table_name text, _column_name text) returns text as $$
 	/* Assign a concrete graphql data type (non-connection) from a sql datatype e.g. 'int4' -> 'Integer!' */
 	select case
 		when sql_data_type in ('integer', 'int4', 'smallint', 'serial') then 'Int'
@@ -212,23 +228,228 @@ create or replace function gql.to_data_type(_table_schema text, _table_name text
 $$ language sql stable returns null on null input;
 
 
-create or replace function gql.to_base_type(_table_schema text, _table_name text) returns text as $$
-	select
-		'type ' || gql.to_base_type_name(ti.table_schema, ti.table_name) || E' {\n'
-		|| string_agg('  ' || gql.to_field_name(ti.table_schema, ti.table_name, ci.column_name) || ': ' || gql.to_data_type(ti.table_schema, ti.table_name, ci.column_name), E'\n')
-		|| E'\n}' as def
+create or replace function gql.list_tables(_table_schema text) returns text[] as
+$$ select array_agg(table_name) from gql.table_info ti where ti.table_schema = _table_schema;
+$$ language sql strict;
+
+create or replace function gql.list_columns(_table_schema text, _table_name text) returns text[] as
+$$  select
+		array_agg(column_name)
+	from
+		gql.column_info ti
+	where
+		ti.table_schema = _table_schema
+		and ti.table_name = _table_name;
+$$ language sql strict;
+
+create or replace function gql.list_primary_key_columns(_table_schema text, _table_name text) returns text[] as
+$$  select
+		pkey_cols
 	from
 		gql.table_info ti
-		left join gql.column_info ci
-		on ti.table_schema = ci.table_schema
-			and ti.table_name = ci.table_name
+	where
+		ti.table_schema = _table_schema
+		and ti.table_name = _table_name;
+$$ language sql strict;
+
+create or replace function gql.list_relationships(_table_schema text, _table_name text) returns text[] as
+$$  select
+		array_agg(constraint_name)
+	from
+		gql.relationship_info ti
+	where
+		ti.table_schema = _table_schema
+		and ti.local_table = _table_name;
+$$ language sql strict;
+
+create or replace function gql.get_column_sql_type(_table_schema text, _table_name text, _column_name text) returns text as
+$$  select
+		sql_data_type
+	from
+		gql.column_info ti
 	where
 		ti.table_schema = _table_schema
 		and ti.table_name = _table_name
-	group by
-		ti.table_schema,
-		ti.table_name
-$$ language sql stable returns null on null input;
+		and ti.column_name = _column_name;
+$$ language sql strict;
+
+
+create or replace function gql.to_gql_type(sql_type text, not_null bool) returns text as
+$$ select
+		case
+			when sql_type in ('integer', 'int4', 'smallint', 'serial') then 'Int'
+			else 'String'
+		end || case
+			when not_null then '!' else '' end;
+$$ language sql immutable strict;
+
+
+create or replace function gql.get_column_gql_type(_table_schema text, _table_name text, _column_name text) returns text as
+$$  select
+		gql.to_gql_type(sql_data_type, not_null)
+	from
+		gql.column_info ti
+	where
+		ti.table_schema = _table_schema
+		and ti.table_name = _table_name
+		and ti.column_name = _column_name;
+$$ language sql strict;
+
+create or replace function gql.is_not_null(table_schema text, table_name text, column_name text) returns bool as
+$$  select
+		not_null
+	from
+		gql.column_info ti
+	where
+		ti.table_schema = table_schema
+		and ti.table_name = table_name
+		and ti.column_name = column_name;
+$$ language sql strict;
+
+create or replace function gql.relationship_to_gql_field_name(_constraint_name text) returns text
+	language plpgsql as
+$$
+declare
+	field_name text := null;
+	rec record := null;
+begin
+	select *
+	from gql.relationship_info ri
+	where ri.constraint_name = _constraint_name
+	limit 1
+	into rec;
+	
+	field_name := rec.foreign_table;
+	field_name := field_name || (select case
+		when rec.foreign_cardinality = 'MANY' then '_collection_by_'
+		when rec.foreign_cardinality = 'ONE' then '_by_'
+		else '_UNREACHABLE_'
+	end);
+
+	field_name := field_name || array_to_string(rec.local_columns, '_and_');
+	field_name := field_name || '_to_';
+	field_name := field_name || array_to_string(rec.foreign_columns, '_and_');	
+
+    if rec.foreign_cardinality = 'MANY' then
+        field_name := field_name || '(first: Int after: Cursor last: Int before: Cursor)';
+    end if;
+	return field_name;
+end;
+$$;
+
+
+
+create or replace function gql.relationship_to_gql_type(_constraint_name text) returns text
+	language plpgsql as
+$$
+declare
+	data_type text := null;
+	rec record := null;
+	foreign_base_type_name text := null;
+begin
+	select *
+	from gql.relationship_info ri
+	where ri.constraint_name = _constraint_name
+	limit 1
+	into rec;
+	foreign_base_type_name := gql.to_base_type_name(rec.foreign_table);
+	return (select case
+		when rec.foreign_cardinality = 'MANY' then gql.to_connection_type_name(rec.foreign_table) || '!'
+		when rec.foreign_cardinality = 'ONE' then foreign_base_type_name || '!'
+		else 'UNREACHABLE'
+	end);
+end;
+$$;
+
+
+
+/*
+    NAMING TYPES
+ */
+create or replace function gql.to_base_type_name(_table_name text) returns text as
+$$ select _table_name;
+$$ language sql immutable;
+
+create or replace function gql.to_edge_type_name(_table_name text) returns text as
+$$ select gql.to_base_type_name(_table_name) || '_edge';
+$$ language sql immutable;
+
+create or replace function gql.to_connection_type_name(_table_name text) returns text as
+$$ select gql.to_base_type_name(_table_name) || '_connection';
+$$ language sql immutable;
+/*
+    END NAMING TYPES
+ */
+
+
+create or replace function gql.to_base_type(_table_schema text, _table_name text) returns text
+	language plpgsql as
+$$
+declare
+	base_type_name text := gql.to_base_type_name(_table_name);
+	column_arr text[] := gql.list_columns(_table_schema, _table_name);
+	col_name text := null;
+	col_gql_type text := null;
+	res text := 'type ' || base_type_name || e' {\n';
+	relation_arr text[] := gql.list_relationships(_table_schema, _table_name);
+	relation_name text := null;
+	relation_field_name text := null;
+	relation_gql_type text := null;
+begin
+	for col_name in select unnest(column_arr) loop
+		raise notice 'Column %', col_name;
+		
+		col_gql_type := gql.get_column_gql_type(_table_schema, _table_name, col_name);
+		
+		-- Add column to result type
+		res := res || e'\t' || col_name || ': ' || col_gql_type || e'\n';
+	end loop;
+	
+	for relation_name in select unnest(relation_arr) loop
+		 relation_field_name := gql.relationship_to_gql_field_name(relation_name);
+		 relation_gql_type := gql.relationship_to_gql_type(relation_name);
+		 
+		 res := res || e'\t' || relation_field_name || ': ' || relation_gql_type || e'\n';
+	end loop;
+	res := res || '}';	
+	return res;
+end;
+$$;
+
+
+create or replace function gql.to_edge_type(_table_schema text, _table_name text) returns text
+	language plpgsql as
+$$
+declare
+	base_type_name text := gql.to_base_type_name(_table_name);
+	edge_type_name text := gql.to_edge_type_name(_table_name);
+begin
+    return format($typedef$
+type %s {
+    cursor: Cursor
+    node: %s
+}    
+$typedef$, edge_type_name, base_type_name);
+end;
+$$;
+
+create or replace function gql.to_connection_type(_table_schema text, _table_name text) returns text
+	language plpgsql as
+$$
+declare
+	edge_type_name text := gql.to_edge_type_name(_table_name);
+	connection_type_name text := gql.to_connection_type_name(_table_name);
+    -- TODO
+	page_info text := null;
+begin
+    return format($typedef$
+type %s {
+    edges: [%s!]!
+    total_count: Int!
+}    
+$typedef$, connection_type_name, edge_type_name);
+end;
+$$;
 
 
 create or replace function gql.to_entrypoint_one(_table_schema text, _table_name text) returns text as $$
@@ -236,11 +457,11 @@ create or replace function gql.to_entrypoint_one(_table_schema text, _table_name
 		gql.camel_case(ti.table_name) || '('
 		|| (
 				select
-					string_agg('  ' || gql.to_field_name(ti.table_schema, ti.table_name, pk._column_name)  || ': ' || gql.to_data_type(ti.table_schema, ti.table_name, pk._column_name), ', ')
+					string_agg('  ' || gql.to_field_name(ti.table_schema, ti.table_name, pk._column_name)  || ': ' || gql.to_gql_type(ti.table_schema, ti.table_name, pk._column_name), ', ')
 				from
 					unnest(ti.pkey_cols) pk(_column_name)
 			)
-		|| ' ): ' || gql.to_base_type_name(ti.table_schema, ti.table_name) || E'\n' as entry_single_row
+		|| ' ): ' || gql.to_base_type_name(ti.table_name) || E'\n' as entry_single_row
 	from
 		gql.table_info ti
 	where
@@ -266,18 +487,22 @@ $$ language sql stable returns null on null input;
 
 
 create or replace function gql.to_schema(_table_schema text) returns text as $$
+    
 	select
-		string_agg(zzz.def, E'\n')
+	    e'scalar Cursor\n\n' ||
+
+        string_agg(zzz.def, E'\n')
 	from
 		(
 			select gql.to_base_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
 			union all
+			select gql.to_edge_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
+			union all
+			select gql.to_connection_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
+			union all
 			select gql.to_query(_table_schema)
 		 ) zzz
 $$ language sql stable returns null on null input;
-
-
-
 
 
 /*
@@ -324,21 +549,14 @@ as $BODY$
         tokens gql.token[] := Array[]::gql.token[];
         cur_token gql.token;
         first_char char := null;
-        first_three_chars char(3) := null;
-        first_char_code smallint := null;
         maybe_tok text;
     begin
         loop
             exit when payload = '';
-            first_char := substring(payload, 1, 1);
-            first_char_code := ascii(first_char);
-            first_three_chars := substring(payload, 1, 3);
-            
-            maybe_tok = substring(payload from '^(\s+)');
+           
+            maybe_tok = substring(payload from '^\s+');
             if maybe_tok is not null then
                 payload := substring(payload, character_length(maybe_tok)+1, 99999);
-                -- Whitespace is not a used token
-                maybe_tok = substring(payload from '^[_A-Za-z][_0-9A-Za-z]*');
                 continue;
             end if;
 
@@ -346,6 +564,38 @@ as $BODY$
             if maybe_tok is not null then
                 payload := substring(payload, character_length(maybe_tok)+1, 99999);
                 tokens := tokens || ('NAME', maybe_tok)::gql.token;
+                continue;
+            end if;
+
+            first_char := substring(payload, 1, 1);
+            
+            if first_char = '{' then
+                payload := substring(payload, 2, 99999);
+                tokens := tokens || ('BRACE_L', '{')::gql.token;
+                continue;
+            end if;
+
+            if first_char = '}' then
+                payload := substring(payload, 2, 99999);
+                tokens := tokens || ('BRACE_R', '}')::gql.token;
+                continue;
+            end if;
+
+            if first_char = '(' then
+                payload := substring(payload, 2, 99999);
+                tokens := tokens || ('PAREN_L', '(')::gql.token;
+                continue;
+            end if;
+
+            if first_char = ')' then
+                payload := substring(payload, 2, 99999);
+                tokens := tokens || ('PAREN_R', ')')::gql.token;
+                continue;
+            end if;
+
+            if first_char = ':' then
+                payload := substring(payload, 2, 99999);
+                tokens := tokens || ('COLON', ':')::gql.token;
                 continue;
             end if;
 
@@ -380,38 +630,31 @@ as $BODY$
             maybe_tok = substring(payload from '^#[^\u000A\u000D]*');
             if maybe_tok is not null then
                 payload := substring(payload, character_length(maybe_tok)+1, 99999);
-                tokens := tokens || ('COMMENT', maybe_tok)::gql.token;
                 continue;
             end if;
 
-            cur_token := (
-                select coalesce(
-                    case
-                        when first_char = '{' then ('BRACE_L', '{')::gql.token
-                        when first_char = '}' then ('BRACE_R', '}')::gql.token
-                        when first_char = '(' then ('PAREN_L', '(')::gql.token
-                        when first_char = ')' then ('PAREN_R', ')')::gql.token
-                        when first_char = ':' then ('COLON', ':')::gql.token
-                        when first_char = '[' then ('BRACKET_L', ']')::gql.token
-                        when first_char = ']' then ('BRACKET_R', '[')::gql.token
-                        when first_char = '!' then ('BANG', '!')::gql.token
-                        when first_char = '$' then ('DOLLAR', '$')::gql.token
-                        when first_char = '&' then ('AMP', '&')::gql.token
-                        when first_char = '=' then ('EQUALS', '=')::gql.token
-                        when first_char = '@' then ('AT', '@')::gql.token
-                        when first_char = '|' then ('PIPE', '|')::gql.token
-                        when first_char = ',' then ('COMMA', ',')::gql.token
-                        when first_three_chars = '...' then ('SPREAD', '...')::gql.token
-                        else null::gql.token
-                    end::gql.token,
-                    ('ERROR', substring(payload from '^.*'))::gql.token
-                )
-            );
-            payload := substring(payload, character_length(cur_token.content)+1, 99999);
+            if first_char = ',' then
+                payload := substring(payload, 2, 99999);
+                continue;
+            end if;
 
-			if cur_token.kind not in ('WHITESPACE', 'COMMA', 'COMMENT') then
-            	tokens := tokens || cur_token;
-			end if;
+            cur_token := coalesce(case
+                    when first_char = '[' then ('BRACKET_L', ']')::gql.token
+                    when first_char = ']' then ('BRACKET_R', '[')::gql.token
+                    when first_char = '!' then ('BANG', '!')::gql.token
+                    when first_char = '$' then ('DOLLAR', '$')::gql.token
+                    when first_char = '&' then ('AMP', '&')::gql.token
+                    when first_char = '=' then ('EQUALS', '=')::gql.token
+                    when first_char = '@' then ('AT', '@')::gql.token
+                    when first_char = '|' then ('PIPE', '|')::gql.token
+                    when substring(payload, 1, 3) = '...' then ('SPREAD', '...')::gql.token
+                    else null::gql.token
+                end::gql.token,
+                ('ERROR', substring(payload from '^.*'))::gql.token
+            );
+
+            payload := substring(payload, character_length(cur_token.content)+1, 99999);
+            tokens := tokens || cur_token;
         end loop;
         return tokens;
     end;
@@ -434,8 +677,7 @@ comment on function gql.tokenize_operation is $comment$
 				}
 			')
 	Returns:
-		Array[('NAME', 'query'), ('WHITESPACE', '  '), ('BRACE_L', '{'),
-		('WHITESPACE', '  '), ('NAME', 'account'), ...]::gql.token[]
+		Array[('NAME', 'query'), ('BRACE_L', '{'), ('NAME', 'account'), ...]::gql.token[]
 $comment$;
 
 
@@ -762,7 +1004,7 @@ $$
     begin
 	return query execute sql_query;
 	end;
-$$ language plpgsql;
+$$ language plpgsql stable;
 
 
 
@@ -773,30 +1015,20 @@ $$ language sql immutable returns null on null input;
 
 
 create or replace function gql.field_to_name(field jsonb) returns text as
-$$ with res as (select (field ->> 'name')::text)
-	select
-		case
-			when (select * from res) <> 'null' then (select * from res)
-			else null
-		end
+$$ select (field ->> 'name')::text;
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.field_to_alias(field jsonb) returns text as
-$$ with res as (select (field ->> 'alias')::text)
-	select
-		case
-			when (select * from res) <> 'null' then (select * from res)
-			else null
-		end
+$$ select (field ->> 'alias')::text;
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.field_to_args(field jsonb) returns jsonb as
-$$ select jsonb_path_query(field, '$.args');
+$$ select (field ->> 'args')::jsonb;
 $$ language sql immutable returns null on null input;
 
 
 create or replace function gql.field_to_fields(field jsonb) returns jsonb as
-$$ select jsonb_path_query(field, '$.fields');
+$$ select (field ->> 'fields')::jsonb;
 $$ language sql immutable returns null on null input;
 
 -- Convert Selection Attributes to SQL Clauses
@@ -819,21 +1051,12 @@ $$ select split_part(split_part(gql.field_to_name(field), '_collection_by_', 1),
 $$ language sql immutable returns null on null input;
 
 
-create or replace function gql.requires_subquery(field jsonb) returns bool as
-$$ select
-    case
-        when gql.field_to_name(field) like '%_collection_by_%_to_%' then true
-        when gql.field_to_name(field) like '%_by_%_to_%' then true
-        else false
-    end
+create or replace function gql.requires_subquery(field jsonb, parent_block_name text) returns bool as
+$$ select (gql.field_to_name(field) like '%_by_%_to_%' or parent_block_name is null);
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.requires_array(field jsonb) returns bool as
-$$ select
-    case
-        when gql.field_to_name(field) like '%_collection_by_%_to_%' then true
-        else false
-    end
+$$ select gql.field_to_name(field) like '%_collection_by_%_to_%';
 $$ language sql immutable returns null on null input;
 
 
@@ -842,36 +1065,15 @@ create or replace function gql.sqlize_field(field jsonb, parent_block_name text)
 $$ select null::text;
 $$ language sql immutable returns null on null input;
 
-
-create or replace function gql.sqlize_to_selector_clause(field jsonb) returns text as
-$$
-	with subfields as (
-		select
-			coalesce(
-				gql.field_to_alias(ar._field),
-                gql.field_to_name(ar._field)
-			) as field_name,
-            gql.sqlize_field(ar._field, gql.field_to_query_block_name(field)) as field_sql,
-            gql.field_to_name(ar._field) like '%_collection_by_%' as requires_array
-		from
-			jsonb_array_elements(gql.field_to_fields(field)) ar(_field)
-	)
-
-	select
-        'jsonb_build_object(' || string_agg(
-                $a$'$a$|| field_name || $a$'$a$ || ', ' || case when requires_array then '( select jsonb_agg(response) from' || field_sql  || 'abc(response) )' else field_sql end,
-			    ', '
-            ) || ')'
-	from
-		subfields
-
-$$ language sql immutable;
+create or replace function gql.single_quote(text) returns text as
+$$ select $a$'$a$ || $1 || $a$'$a$
+$$ language sql immutable strict;
 
 
 create or replace function gql.sqlize_to_join_clause(field jsonb, parent_block_name text) returns text as
 $$ select
     case
-        when gql.requires_subquery(field) then (
+        when gql.requires_subquery(field, parent_block_name) then (
             with parts as (
                 select
                     gql.sqlize_to_name(field) as local_table_name,
@@ -890,6 +1092,107 @@ $$ select
 $$ language sql immutable;
 
 
+
+create or replace function gql.sqlize_to_selector_clause(field jsonb, parent_block_name text) returns text
+    language plpgsql immutable as
+$$
+    declare
+        subfields jsonb[] := (select array_agg(abc.b) from jsonb_array_elements(gql.field_to_fields(field)) abc(b));
+        subfield jsonb;
+        subfield_name text;
+        response text := 'jsonb_build_object(';
+        subfield_sql text;
+    begin
+    
+    for subfield in select unnest(subfields) loop
+        subfield_name := coalesce(
+            gql.field_to_alias(subfield),
+            gql.field_to_name(subfield)
+        );
+        response := response || gql.single_quote(subfield_name) || ',';
+        response := response || gql.sqlize_field(subfield, parent_block_name) || ',';
+    end loop;
+    
+    -- Remove trailing comma
+    if subfield is not null then
+        response := substring(response, 1, character_length(response)-1);
+    end if;
+    response := response || ')';
+
+    return response;
+    end;
+$$;
+
+
+create or replace function gql.sqlize_pkey_cols_to_cursor(pkey_cols text[]) returns text as 
+$$ select '(' || string_agg(x, ',') || ')' from unnest(pkey_cols) ab(x);
+$$ language sql immutable;
+
+create or replace function gql.sqlize_connection_field(field jsonb, parent_block_name text) returns text
+    language 'plpgsql'
+    immutable
+as $BODY$
+    declare
+        block_name text := gql.field_to_query_block_name(field);
+        field_name text := gql.field_to_name(field); -- if this is not a subselect, field_name is a valid column_name
+        table_name text := gql.sqlize_to_name(field);
+        filter_clause text := gql.sqlize_to_filter_clause(field);
+        _alias text := gql.field_to_alias(field);
+        join_clause text := gql.sqlize_to_join_clause(field, parent_block_name);
+        requires_subquery bool := gql.requires_subquery(field, parent_block_name);
+        requires_array bool := gql.requires_array(field);
+        pkey_cols text[] := gql.to_primary_key_cols('public', table_name);
+        cursor_selector text := gql.sqlize_pkey_cols_to_cursor(pkey_cols);
+        selector_clause text := null;
+        subfields jsonb := null;
+        edges jsonb := null;
+        node jsonb := null;
+    begin
+
+    -- Get Edges Clause
+    edges := (select b from jsonb_array_elements(gql.field_to_fields(field)) abc(b) where (b ->> 'name') = 'edges'); 
+    raise notice 'Edges %', edges;
+    node := (select b from jsonb_array_elements(gql.field_to_fields(edges)) abc(b) where (b ->> 'name') = 'node'); 
+    raise notice 'Node %', node;
+    selector_clause := gql.sqlize_to_selector_clause(node, block_name);
+
+    return format($query$
+            (
+                with %s as ( -- block name
+                    select
+                        *,
+                        1 as total_count,
+                        %s as cursor
+                    from
+                        %s -- table name
+                    where
+                        (%s) -- key clause
+                        and (%s) -- join clause
+                )
+                
+                select
+                    jsonb_build_object(
+                        'total_count', total_count,
+                        'edges', json_agg(
+                            jsonb_build_object(
+                                'cursor', cursor,
+                                'node', %s
+                            )
+                        )
+                    ) as response -- selector clause
+                from
+                   %s -- block name
+                group by
+                    total_count
+            )
+        $query$,block_name, cursor_selector, table_name, filter_clause, join_clause, selector_clause, block_name);
+
+    end;
+$BODY$;
+
+
+ 
+
 create or replace function gql.sqlize_field(field jsonb, parent_block_name text) returns text
     language 'plpgsql'
     immutable
@@ -901,46 +1204,64 @@ as $BODY$
         filter_clause text := gql.sqlize_to_filter_clause(field);
         _alias text := gql.field_to_alias(field);
         join_clause text := gql.sqlize_to_join_clause(field, parent_block_name);
-        selector_clause text := gql.sqlize_to_selector_clause(field);
-        requires_subquery bool := gql.requires_subquery(field);
+        selector_clause text := gql.sqlize_to_selector_clause(field, parent_block_name);
+        requires_subquery bool := gql.requires_subquery(field, parent_block_name);
+        requires_array bool := gql.requires_array(field);
     begin
-
-    if (not requires_subquery and parent_block_name is not null) then
-        -- Scalar field
+      
+    -- Basic field 
+    if not requires_subquery then
         return field_name;
-    -- Table field
     end if;
-    return format($query$
-            (
-                with %s as ( -- block name
+    
+    if field_name like '%_by_%' then
+        selector_clause := gql.sqlize_to_selector_clause(field, block_name);
+    else
+        selector_clause := gql.sqlize_to_selector_clause(field, block_name);
+    end if;
+
+    -- Query 1 (Entrypoint 1) 
+    if not requires_array then
+        return format($query$
+                (
+                    with %s as ( -- block name
+                        select
+                            *
+                        from
+                            %s -- table name
+                        where
+                            (%s) -- key clause
+                            and (%s) -- join clause
+                    )
                     select
-                        *
+                       %s as response -- selector clause
                     from
-                        %s -- table name
-                    where
-                        (%s) -- key clause
-                        and (%s) -- join clause
+                       %s -- block name
                 )
-                select
-                   %s as response -- selector clause
-                from
-                   %s -- block name
-            )
-        $query$,block_name, table_name, filter_clause, join_clause, selector_clause, block_name);
+            $query$,block_name, table_name, filter_clause, join_clause, selector_clause, block_name);
+    end if;
+
+    if requires_array then
+        return gql.sqlize_connection_field(field, parent_block_name);
+    end if;
+
+
+    return 'UNREACHABLE';
+
     end;
 $BODY$;
 
 
-create or replace function gql.execute_operation(graphql_query text) returns jsonb as
+create or replace function gql.execute(operation text) returns jsonb as
 $$
     declare
-        tokens gql.token[] := gql.tokenize_operation(graphql_query);
+        tokens gql.token[] := gql.tokenize_operation(operation);
         ast jsonb := gql.parse_operation(tokens);
         sql_query text := gql.sqlize_field(ast, parent_block_name := null);
     begin
-		-- raise notice 'Tokens %s', tokens::text;
-		-- raise notice 'AST %s', jsonb_pretty(ast);
-		-- raise notice 'SQL %s', sql_query;
+		raise notice 'Tokens %', tokens::text;
+		raise notice 'AST %', jsonb_pretty(ast);
+		raise notice 'SQL %', sql_query;
         return gql.execute_sql(sql_query)::jsonb;
 	end;
-$$ language plpgsql;
+$$ language plpgsql stable;
