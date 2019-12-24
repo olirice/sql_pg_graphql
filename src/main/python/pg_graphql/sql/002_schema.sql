@@ -278,6 +278,10 @@ begin
 	field_name := field_name || array_to_string(rec.local_columns, '_and_');
 	field_name := field_name || '_to_';
 	field_name := field_name || array_to_string(rec.foreign_columns, '_and_');	
+
+    if rec.foreign_cardinality = 'MANY' then
+        field_name := field_name || '(first: Int after: Cursor last: Int before: Cursor)';
+    end if;
 	return field_name;
 end;
 $$;
@@ -297,9 +301,9 @@ begin
 	where ri.constraint_name = _constraint_name
 	limit 1
 	into rec;
-	foreign_base_type_name := gql.table_name_to_base_type_name(rec.foreign_table);
+	foreign_base_type_name := gql.to_base_type_name(rec.foreign_table);
 	return (select case
-		when rec.foreign_cardinality = 'MANY' then '[' || foreign_base_type_name || '!]'
+		when rec.foreign_cardinality = 'MANY' then gql.to_connection_type_name(rec.foreign_table) || '!'
 		when rec.foreign_cardinality = 'ONE' then foreign_base_type_name || '!'
 		else 'UNREACHABLE'
 	end);
@@ -307,17 +311,31 @@ end;
 $$;
 
 
-create or replace function gql.table_name_to_base_type_name(_table_name text) returns text as
+
+/*
+    NAMING TYPES
+ */
+create or replace function gql.to_base_type_name(_table_name text) returns text as
 $$ select _table_name;
 $$ language sql immutable;
 
+create or replace function gql.to_edge_type_name(_table_name text) returns text as
+$$ select gql.to_base_type_name(_table_name) || '_edge';
+$$ language sql immutable;
+
+create or replace function gql.to_connection_type_name(_table_name text) returns text as
+$$ select gql.to_base_type_name(_table_name) || '_connection';
+$$ language sql immutable;
+/*
+    END NAMING TYPES
+ */
 
 
 create or replace function gql.to_base_type(_table_schema text, _table_name text) returns text
 	language plpgsql as
 $$
 declare
-	base_type_name text := _table_name;
+	base_type_name text := gql.to_base_type_name(_table_name);
 	column_arr text[] := gql.list_columns(_table_schema, _table_name);
 	col_name text := null;
 	col_gql_type text := null;
@@ -348,6 +366,40 @@ end;
 $$;
 
 
+create or replace function gql.to_edge_type(_table_schema text, _table_name text) returns text
+	language plpgsql as
+$$
+declare
+	base_type_name text := gql.to_base_type_name(_table_name);
+	edge_type_name text := gql.to_edge_type_name(_table_name);
+begin
+    return format($typedef$
+type %s {
+    cursor: Cursor
+    node: %s
+}    
+$typedef$, edge_type_name, base_type_name);
+end;
+$$;
+
+create or replace function gql.to_connection_type(_table_schema text, _table_name text) returns text
+	language plpgsql as
+$$
+declare
+	edge_type_name text := gql.to_edge_type_name(_table_name);
+	connection_type_name text := gql.to_connection_type_name(_table_name);
+    -- TODO
+	page_info text := null;
+begin
+    return format($typedef$
+type %s {
+    edges: [%s!]!
+    total_count: Int!
+}    
+$typedef$, connection_type_name, edge_type_name);
+end;
+$$;
+
 
 create or replace function gql.to_entrypoint_one(_table_schema text, _table_name text) returns text as $$
 	select
@@ -358,7 +410,7 @@ create or replace function gql.to_entrypoint_one(_table_schema text, _table_name
 				from
 					unnest(ti.pkey_cols) pk(_column_name)
 			)
-		|| ' ): ' || gql.table_name_to_base_type_name(ti.table_name) || E'\n' as entry_single_row
+		|| ' ): ' || gql.to_base_type_name(ti.table_name) || E'\n' as entry_single_row
 	from
 		gql.table_info ti
 	where
@@ -384,11 +436,18 @@ $$ language sql stable returns null on null input;
 
 
 create or replace function gql.to_schema(_table_schema text) returns text as $$
+    
 	select
-		string_agg(zzz.def, E'\n')
+	    e'scalar Cursor\n\n' ||
+
+        string_agg(zzz.def, E'\n')
 	from
 		(
 			select gql.to_base_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
+			union all
+			select gql.to_edge_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
+			union all
+			select gql.to_connection_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
 			union all
 			select gql.to_query(_table_schema)
 		 ) zzz

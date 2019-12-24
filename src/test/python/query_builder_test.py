@@ -83,7 +83,11 @@ def test_nested_operation(session, build_tables):
                 account(id: 1) {
                     name
                     post_collection_by_id_to_owner_id {
-                        title
+                        edges{
+                            node{
+                                title
+                            }
+                        }
                     }
                     created_at
                 }
@@ -92,7 +96,8 @@ def test_nested_operation(session, build_tables):
     """
     (result,) = session.execute(query).fetchone()
     assert isinstance(result, dict)
-    assert isinstance(result["post_collection_by_id_to_owner_id"], list)
+    assert isinstance(result["post_collection_by_id_to_owner_id"], dict)
+    assert isinstance(result["post_collection_by_id_to_owner_id"]["edges"], list)
 
 
 def test_nested_operation_join_correctness(session, build_tables):
@@ -111,9 +116,8 @@ def test_nested_operation_join_correctness(session, build_tables):
     """
     (result,) = session.execute(query).fetchone()
     assert isinstance(result, dict)
-    assert isinstance(result["post_collection_by_id_to_owner_id"], list)
     # There are 3 entries in the post table but only 2 have account.id=1
-    assert len(result["post_collection_by_id_to_owner_id"]) == 2
+    assert len(result["post_collection_by_id_to_owner_id"]["edges"]) == 2
 
 
 def _builder_integration(session):
@@ -126,7 +130,11 @@ def _builder_integration(session):
                 account(id: 1) {
                     name
                     post_collection_by_id_to_owner_id {
-                        title
+                        edges{
+                            node {
+                                title
+                            }
+                        }
                     }
                     created_at
                 }
