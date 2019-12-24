@@ -17,7 +17,7 @@ $$
     begin
 	return query execute sql_query;
 	end;
-$$ language plpgsql;
+$$ language plpgsql stable;
 
 
 
@@ -64,10 +64,8 @@ $$ select split_part(split_part(gql.field_to_name(field), '_collection_by_', 1),
 $$ language sql immutable returns null on null input;
 
 
-create or replace function gql.requires_subquery(field jsonb) returns bool as
-$$ select
-    (gql.field_to_name(field) like '%_collection_by_%_to_%')
-    or (gql.field_to_name(field) like '%_by_%_to_%');
+create or replace function gql.requires_subquery(field jsonb, parent_block_name text) returns bool as
+$$ select (gql.field_to_name(field) like '%_by_%_to_%' or parent_block_name is null);
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.requires_array(field jsonb) returns bool as
@@ -80,36 +78,15 @@ create or replace function gql.sqlize_field(field jsonb, parent_block_name text)
 $$ select null::text;
 $$ language sql immutable returns null on null input;
 
-
-create or replace function gql.sqlize_to_selector_clause(field jsonb) returns text as
-$$
-	with subfields as (
-		select
-			coalesce(
-				gql.field_to_alias(ar._field),
-                gql.field_to_name(ar._field)
-			) as field_name,
-            gql.sqlize_field(ar._field, gql.field_to_query_block_name(field)) as field_sql,
-            gql.field_to_name(ar._field) like '%_collection_by_%' as requires_array
-		from
-			jsonb_array_elements(gql.field_to_fields(field)) ar(_field)
-	)
-
-	select
-        'jsonb_build_object(' || string_agg(
-                $a$'$a$|| field_name || $a$'$a$ || ', ' || case when requires_array then '( select jsonb_agg(response) from' || field_sql  || 'abc(response) )' else field_sql end,
-			    ', '
-            ) || ')'
-	from
-		subfields
-
-$$ language sql immutable;
+create or replace function gql.single_quote(text) returns text as
+$$ select $a$'$a$ || $1 || $a$'$a$
+$$ language sql immutable strict;
 
 
 create or replace function gql.sqlize_to_join_clause(field jsonb, parent_block_name text) returns text as
 $$ select
     case
-        when gql.requires_subquery(field) then (
+        when gql.requires_subquery(field, parent_block_name) then (
             with parts as (
                 select
                     gql.sqlize_to_name(field) as local_table_name,
@@ -128,6 +105,107 @@ $$ select
 $$ language sql immutable;
 
 
+
+create or replace function gql.sqlize_to_selector_clause(field jsonb, parent_block_name text) returns text
+    language plpgsql immutable as
+$$
+    declare
+        subfields jsonb[] := (select array_agg(abc.b) from jsonb_array_elements(gql.field_to_fields(field)) abc(b));
+        subfield jsonb;
+        subfield_name text;
+        response text := 'jsonb_build_object(';
+        subfield_sql text;
+    begin
+    
+    for subfield in select unnest(subfields) loop
+        subfield_name := coalesce(
+            gql.field_to_alias(subfield),
+            gql.field_to_name(subfield)
+        );
+        response := response || gql.single_quote(subfield_name) || ',';
+        response := response || gql.sqlize_field(subfield, parent_block_name) || ',';
+    end loop;
+    
+    -- Remove trailing comma
+    if subfield is not null then
+        response := substring(response, 1, character_length(response)-1);
+    end if;
+    response := response || ')';
+
+    return response;
+    end;
+$$;
+
+
+create or replace function gql.sqlize_pkey_cols_to_cursor(pkey_cols text[]) returns text as 
+$$ select '(' || string_agg(x, ',') || ')' from unnest(pkey_cols) ab(x);
+$$ language sql immutable;
+
+create or replace function gql.sqlize_connection_field(field jsonb, parent_block_name text) returns text
+    language 'plpgsql'
+    immutable
+as $BODY$
+    declare
+        block_name text := gql.field_to_query_block_name(field);
+        field_name text := gql.field_to_name(field); -- if this is not a subselect, field_name is a valid column_name
+        table_name text := gql.sqlize_to_name(field);
+        filter_clause text := gql.sqlize_to_filter_clause(field);
+        _alias text := gql.field_to_alias(field);
+        join_clause text := gql.sqlize_to_join_clause(field, parent_block_name);
+        requires_subquery bool := gql.requires_subquery(field, parent_block_name);
+        requires_array bool := gql.requires_array(field);
+        pkey_cols text[] := gql.to_primary_key_cols('public', table_name);
+        cursor_selector text := gql.sqlize_pkey_cols_to_cursor(pkey_cols);
+        selector_clause text := null;
+        subfields jsonb := null;
+        edges jsonb := null;
+        node jsonb := null;
+    begin
+
+    -- Get Edges Clause
+    edges := (select b from jsonb_array_elements(gql.field_to_fields(field)) abc(b) where (b ->> 'name') = 'edges'); 
+    raise notice 'Edges %', edges;
+    node := (select b from jsonb_array_elements(gql.field_to_fields(edges)) abc(b) where (b ->> 'name') = 'node'); 
+    raise notice 'Node %', node;
+    selector_clause := gql.sqlize_to_selector_clause(node, block_name);
+
+    return format($query$
+            (
+                with %s as ( -- block name
+                    select
+                        *,
+                        1 as total_count,
+                        %s as cursor
+                    from
+                        %s -- table name
+                    where
+                        (%s) -- key clause
+                        and (%s) -- join clause
+                )
+                
+                select
+                    jsonb_build_object(
+                        'total_count', total_count,
+                        'edges', json_agg(
+                            jsonb_build_object(
+                                'cursor', cursor,
+                                'node', %s
+                            )
+                        )
+                    ) as response -- selector clause
+                from
+                   %s -- block name
+                group by
+                    total_count
+            )
+        $query$,block_name, cursor_selector, table_name, filter_clause, join_clause, selector_clause, block_name);
+
+    end;
+$BODY$;
+
+
+ 
+
 create or replace function gql.sqlize_field(field jsonb, parent_block_name text) returns text
     language 'plpgsql'
     immutable
@@ -139,32 +217,50 @@ as $BODY$
         filter_clause text := gql.sqlize_to_filter_clause(field);
         _alias text := gql.field_to_alias(field);
         join_clause text := gql.sqlize_to_join_clause(field, parent_block_name);
-        selector_clause text := gql.sqlize_to_selector_clause(field);
-        requires_subquery bool := gql.requires_subquery(field);
+        selector_clause text := gql.sqlize_to_selector_clause(field, parent_block_name);
+        requires_subquery bool := gql.requires_subquery(field, parent_block_name);
+        requires_array bool := gql.requires_array(field);
     begin
-
-    if (not requires_subquery and parent_block_name is not null) then
-        -- Scalar field
+      
+    -- Basic field 
+    if not requires_subquery then
         return field_name;
-    -- Table field
     end if;
-    return format($query$
-            (
-                with %s as ( -- block name
+    
+    if field_name like '%_by_%' then
+        selector_clause := gql.sqlize_to_selector_clause(field, block_name);
+    else
+        selector_clause := gql.sqlize_to_selector_clause(field, block_name);
+    end if;
+
+    -- Query 1 (Entrypoint 1) 
+    if not requires_array then
+        return format($query$
+                (
+                    with %s as ( -- block name
+                        select
+                            *
+                        from
+                            %s -- table name
+                        where
+                            (%s) -- key clause
+                            and (%s) -- join clause
+                    )
                     select
-                        *
+                       %s as response -- selector clause
                     from
-                        %s -- table name
-                    where
-                        (%s) -- key clause
-                        and (%s) -- join clause
+                       %s -- block name
                 )
-                select
-                   %s as response -- selector clause
-                from
-                   %s -- block name
-            )
-        $query$,block_name, table_name, filter_clause, join_clause, selector_clause, block_name);
+            $query$,block_name, table_name, filter_clause, join_clause, selector_clause, block_name);
+    end if;
+
+    if requires_array then
+        return gql.sqlize_connection_field(field, parent_block_name);
+    end if;
+
+
+    return 'UNREACHABLE';
+
     end;
 $BODY$;
 
@@ -176,9 +272,9 @@ $$
         ast jsonb := gql.parse_operation(tokens);
         sql_query text := gql.sqlize_field(ast, parent_block_name := null);
     begin
-		-- raise notice 'Tokens %s', tokens::text;
-		-- raise notice 'AST %s', jsonb_pretty(ast);
-		-- raise notice 'SQL %s', sql_query;
+		raise notice 'Tokens %', tokens::text;
+		raise notice 'AST %', jsonb_pretty(ast);
+		raise notice 'SQL %', sql_query;
         return gql.execute_sql(sql_query)::jsonb;
 	end;
-$$ language plpgsql;
+$$ language plpgsql stable;
