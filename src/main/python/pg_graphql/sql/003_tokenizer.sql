@@ -35,8 +35,7 @@ create type gql.token as (
 
 
 create or replace function gql.tokenize_operation(payload text) returns gql.token[]
-    language 'plpgsql'
-    immutable
+    language plpgsql immutable strict parallel safe
 as $BODY$
     declare
         tokens gql.token[] := Array[]::gql.token[];

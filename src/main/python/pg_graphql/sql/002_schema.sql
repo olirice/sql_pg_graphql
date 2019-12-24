@@ -191,16 +191,6 @@ $$  select
 		and ti.table_name = _table_name;
 $$ language sql strict;
 
-create or replace function gql.list_primary_key_columns(_table_schema text, _table_name text) returns text[] as
-$$  select
-		pkey_cols
-	from
-		gql.table_info ti
-	where
-		ti.table_schema = _table_schema
-		and ti.table_name = _table_name;
-$$ language sql strict;
-
 create or replace function gql.list_relationships(_table_schema text, _table_name text) returns text[] as
 $$  select
 		array_agg(constraint_name)
@@ -232,28 +222,6 @@ $$ select
 			when not_null then '!' else '' end;
 $$ language sql immutable strict;
 
-
-create or replace function gql.get_column_gql_type(_table_schema text, _table_name text, _column_name text) returns text as
-$$  select
-		gql.to_gql_type(sql_data_type, not_null)
-	from
-		gql.column_info ti
-	where
-		ti.table_schema = _table_schema
-		and ti.table_name = _table_name
-		and ti.column_name = _column_name;
-$$ language sql strict;
-
-create or replace function gql.is_not_null(table_schema text, table_name text, column_name text) returns bool as
-$$  select
-		not_null
-	from
-		gql.column_info ti
-	where
-		ti.table_schema = table_schema
-		and ti.table_name = table_name
-		and ti.column_name = column_name;
-$$ language sql strict;
 
 create or replace function gql.relationship_to_gql_field_name(_constraint_name text) returns text
 	language plpgsql as

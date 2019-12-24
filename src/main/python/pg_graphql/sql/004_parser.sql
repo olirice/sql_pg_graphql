@@ -32,13 +32,8 @@ create type gql.partial_parse as (
 );
 
 
-create or replace function gql.parse_fields(tokens gql.token[]) returns gql.partial_parse as
-$$ select null::gql.partial_parse $$ language sql immutable returns null on null input;
-
-
 create or replace function gql.parse_field(tokens gql.token[]) returns gql.partial_parse
-    language 'plpgsql'
-    immutable
+    language plpgsql immutable strict parallel safe
 as $BODY$
     declare
         _alias text;
@@ -127,8 +122,7 @@ as $BODY$
 $BODY$;
 
 create or replace function gql.parse_operation(tokens gql.token[]) returns jsonb
-    language 'plpgsql'
-    immutable
+    language plpgsql immutable strict parallel safe
 as $BODY$
     begin
         -- Standard syntax: "query { ..."
