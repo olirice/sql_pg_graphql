@@ -39,10 +39,10 @@ as $BODY$
         _alias text;
         _name text;
         cur jsonb;
-        args jsonb := '[]';
+        args jsonb := '{}';
         last_iter_args jsonb := null;
         last_iter_fields jsonb := null;
-        fields jsonb := '[]';
+        fields jsonb := '{}';
         cur_field gql.partial_parse;
     begin
     -- Read Alias
@@ -68,14 +68,14 @@ as $BODY$
                 -- Special handling of string args to strip the double quotes
                 if tokens[3].kind = 'STRING' then
                     cur := jsonb_build_object(
-                        'key', tokens[1].content,
-                        'value', substring(tokens[3].content, 2, character_length(tokens[3].content)-2)
+                        tokens[1].content,
+                        substring(tokens[3].content, 2, character_length(tokens[3].content)-2)
                     );
                 -- Any other scalar arg
                 else
                     cur := jsonb_build_object(
-                        'key', tokens[1].content,
-                        'value', tokens[3].content
+                        tokens[1].content,
+                        tokens[3].content
                     );
                 end if;
                 tokens := tokens[4:];
@@ -89,7 +89,7 @@ as $BODY$
         -- Advance past the PAREN_R
         tokens := tokens[2:];
     else
-        args := '[]'::jsonb;
+        args := '{}'::jsonb;
     end if;
 
     -- Read Fields
@@ -103,18 +103,19 @@ as $BODY$
             tokens := cur_field.remaining;
         end loop;
     else
-        fields := '[]'::jsonb;
+        fields := '{}'::jsonb;
     end if;
 
 	return (
         select
             (
 		        jsonb_build_object(
+                    _name, jsonb_build_object(
                     'alias', _alias,
                     'name', _name,
                     'args', args,
                     'fields', fields
-                ),
+                )),
 	            tokens
 	        )::gql.partial_parse
     );

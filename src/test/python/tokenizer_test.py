@@ -50,6 +50,7 @@ def _integration(session):
         $q$)
     """)
     (result,) = session.execute(query).fetchone()
+
     assert True
 
 

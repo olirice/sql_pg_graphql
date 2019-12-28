@@ -7,6 +7,7 @@ from sqlalchemy.sql.elements import TextClause
 def is_valid_ast(ast):
     """Validate that a graphql operation ast contains all AST keys"""
     keys = ["args", "alias", "name", "fields"]
+
     for key in keys:
         if key not in ast:
             return False
@@ -15,12 +16,14 @@ def is_valid_ast(ast):
     assert ast["fields"] is not None
     assert ast["args"] is not None
 
-    for field in ast["fields"]:
+    for key, field in ast["fields"].items():
         if not is_valid_ast(field):
             return False
 
-    for arg in ast["args"]:
-        if not all([key in arg for key in ["key", "value"]]):
+    for key, val in ast["args"].items():
+        if not isinstance(key, str):
+            return False
+        if not isinstance(val, (str, dict)):
             return False
     return True
 
@@ -55,7 +58,7 @@ def test_parser_integration(session):
     (result,) = session.execute(query).fetchone()
     result = json.loads(result)
     print(json.dumps(result, indent=2))
-    assert is_valid_ast(result)
+    assert is_valid_ast(result['account'])
 
 
 def test_parser_speed(session, benchmark):

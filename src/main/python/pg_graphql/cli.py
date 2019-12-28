@@ -1,6 +1,8 @@
 # pylint: disable=invalid-name,redefined-outer-name
 import time
 
+import sys
+
 import click
 import pytest
 import sqlparse
@@ -45,7 +47,7 @@ def test(connection):
     # Store connection string on class variable to make it accessible to pytest
     Context.connection = connection
     exit_code = pytest.main([TEST_DIR, "-x", "-p", "no:cacheprovider",])
-    return exit_code
+    sys.exit(exit_code)
 
 
 @main.command()

@@ -246,6 +246,24 @@ begin
 	field_name := field_name || array_to_string(rec.local_columns, '_and_');
 	field_name := field_name || '_to_';
 	field_name := field_name || array_to_string(rec.foreign_columns, '_and_');	
+	return field_name;
+end;
+$$;
+
+create or replace function gql.relationship_to_gql_field_def(_constraint_name text) returns text
+	language plpgsql as
+$$
+declare
+	field_name text := null;
+	rec record := null;
+begin
+	select *
+	from gql.relationship_info ri
+	where ri.constraint_name = _constraint_name
+	limit 1
+	into rec;
+	
+	field_name := gql.relationship_to_gql_field_name(_constraint_name);
 
     if rec.foreign_cardinality = 'MANY' then
         field_name := field_name || '(first: Int after: Cursor last: Int before: Cursor)';
@@ -316,14 +334,14 @@ begin
 	for col_name in select unnest(column_arr) loop
 		raise notice 'Column %', col_name;
 		
-		col_gql_type := gql.get_column_gql_type(_table_schema, _table_name, col_name);
+		col_gql_type := gql.to_gql_type(_table_schema, _table_name, col_name);
 		
 		-- Add column to result type
 		res := res || e'\t' || col_name || ': ' || col_gql_type || e'\n';
 	end loop;
 	
 	for relation_name in select unnest(relation_arr) loop
-		 relation_field_name := gql.relationship_to_gql_field_name(relation_name);
+		 relation_field_name := gql.relationship_to_gql_field_def(relation_name);
 		 relation_gql_type := gql.relationship_to_gql_type(relation_name);
 		 
 		 res := res || e'\t' || relation_field_name || ': ' || relation_gql_type || e'\n';

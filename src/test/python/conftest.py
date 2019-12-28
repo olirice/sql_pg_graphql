@@ -35,5 +35,5 @@ def session(session_maker):
     _session = session_maker
 
     yield _session
-    _session.rollback()
+    # _session.rollback()
     _session.close()
