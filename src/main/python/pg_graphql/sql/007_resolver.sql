@@ -11,22 +11,9 @@ Public API:
     - gql.execute(operation: text) returns jsonb
 */
 
-
-
-create or replace function gql.execute(operation text) returns jsonb as
-$$
-    declare
-        tokens gql.token[] := gql.tokenize_operation(operation);
-        ast jsonb := gql.parse_operation(tokens);
-        sql_query text := gql.sqlize_field(ast, parent_block_name := null);
-    begin
-        -- Raising these notices takes about 0.1 milliseconds
-		--raise notice 'Tokens %', tokens::text;
-		--raise notice 'AST %', jsonb_pretty(ast);
-		raise notice 'SQL %', sql_query;
-        return gql.execute_sql(sql_query)::jsonb;
-	end;
-$$ language plpgsql stable;
+create or replace function gql.to_resolver_name(field_name text) returns text as
+$$ select 'gql."resolve_' || field_name || '"'
+$$ language sql immutable returns null on null input;
 
 
 create or replace function gql.build_resolve_rows(_table_schema text) returns void
@@ -39,20 +26,24 @@ $body$
 		clause text;
 		func_def text;
 		relationship_field_name text;
+        resolver_name text;
 	begin
 		for tab_rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
+
+            resolver_name := gql.to_resolver_name(gql.to_base_name(tab_rec.table_name));
 		
 			func_def := format(e'
-			create or replace function gql.resolve_%s_%s(rec %s.%s, field jsonb)
+			create or replace function %s(rec %s.%s, field jsonb)
 				returns jsonb
-				language sql
+				language plpgsql
 			    immutable
 				parallel safe
 				as
 			$$
-				select jsonb_build_object(
+            begin
+				return jsonb_build_object(
 							   coalesce(field ->> \'alias\', field ->> \'name\'), (
-			', tab_rec.table_schema, tab_rec.table_name, tab_rec.table_schema, tab_rec.table_name);
+			', resolver_name, tab_rec.table_schema, tab_rec.table_name);
 			
 			-- column resolvers
 			for col_rec in (
@@ -62,7 +53,6 @@ $body$
 					ci.table_schema=tab_rec.table_schema
 					and ci.table_name = tab_rec.table_name)
 				loop
-					
 					clause := format(e'
 					case when field #> \'{fields,%s}\' is not null
 									 then jsonb_build_object(
@@ -88,18 +78,18 @@ $body$
 					and ci.local_table = tab_rec.table_name)
 				loop
 					relationship_field_name := gql.relationship_to_gql_field_name(rel_rec.constraint_name);
+                    resolver_name := gql.to_resolver_name(relationship_field_name);
 					clause := format(e'
 					case when field #> \'{fields,%s}\' is not null
-									 then gql.resolve_%s_%s_%s(rec, field #> \'{fields,%s}\' )
+									 then %s(rec, field #> \'{fields,%s}\' )
 									 else \'{}\'::jsonb
 									 end ||',
-					relationship_field_name, rel_rec.table_schema, rel_rec.local_table,
-					relationship_field_name, relationship_field_name);
+					relationship_field_name, resolver_name, relationship_field_name);
 					func_def := func_def || clause;
 				end loop;
 				
 				func_def := substring(func_def, 1, character_length(func_def)-3);
-				func_def := func_def || e'));$$;';
+                func_def := func_def || e')); end;$$;';
 			raise notice 'Function %', func_def;
 			execute func_def;
 		end loop;
@@ -131,10 +121,11 @@ $body$
 			join_clause := substring(join_clause, 1, character_length(join_clause)-4);
 			
 			func_def := format(e'
-create or replace function gql.resolve_%s_%s_%s(rec %s.%s, field jsonb) returns jsonb
-	language sql stable as
+create or replace function %s(rec %s.%s, field jsonb) returns jsonb
+	language plpgsql stable as
 $$
-	select 
+begin
+    return 
 		jsonb_build_object(
 			coalesce(field ->> \'alias\', field->> \'name\'),
 			jsonb_build_object(
@@ -144,8 +135,7 @@ $$
 					jsonb_build_object(
 						\'cursor\', \'my_cursor\'
 					) ||
-					-- TODO: This returns an object 
-					gql.resolve_%s_%s(
+					%s(
 						rec:=%s,
 						field:=field #> \'{fields,edges,fields,node}\'
 					)
@@ -155,9 +145,10 @@ $$
 	from
 		%s.%s
 	where
-		%s
-$$;', rec.table_schema, rec.local_table, gql.relationship_to_gql_field_name(rec.constraint_name), rec.table_schema,
-	rec.local_table, rec.table_schema, rec.foreign_table, rec.foreign_table, rec.table_schema, rec.foreign_table,
+		%s;
+end;
+$$;', gql.to_resolver_name(gql.relationship_to_gql_field_name(rec.constraint_name)), rec.table_schema,
+	rec.local_table, gql.to_resolver_name(gql.to_base_name(rec.foreign_table)), rec.foreign_table, rec.table_schema, rec.foreign_table,
 	join_clause);
 			raise notice 'Function %', func_def;
 			execute func_def;
@@ -171,23 +162,25 @@ $body$
 	declare
 		rec record;
 		func_def text;
+		resolver_name text;
 	begin
 		for rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
+            resolver_name := gql.to_resolver_name(gql.to_base_name(rec.table_name));
 			func_def := format(e'
-create or replace function gql.resolve_%s_%s(rec %s.%s, field jsonb) returns jsonb
-	language sql stable as
-$$ select null::jsonb;
-$$;', rec.table_schema, rec.table_name, rec.table_schema, rec.table_name);
+create or replace function %s(rec %s.%s, field jsonb) returns jsonb
+language plpgsql stable as
+$$ begin return null::jsonb; end;
+$$;', resolver_name, rec.table_schema, rec.table_name);
 			execute func_def;
 		end loop;
 
 		for rec in select * from gql.relationship_info ci where ci.table_schema=table_schema loop
+            resolver_name := gql.to_resolver_name(gql.relationship_to_gql_field_name(rec.constraint_name));
 			func_def := format(e'
-create or replace function gql.resolve_%s_%s_%s(rec %s.%s, field jsonb) returns jsonb
-	language sql stable as
-$$ select null::jsonb;
-$$;', rec.table_schema, rec.local_table, gql.relationship_to_gql_field_name(rec.constraint_name), rec.table_schema,
-	rec.local_table);
+create or replace function %s(rec %s.%s, field jsonb) returns jsonb
+	language plpgsql stable as
+    $$ begin return null::jsonb; end;
+$$;', resolver_name, rec.table_schema, rec.local_table);
 			execute func_def;
 		end loop;
 	end;
@@ -200,6 +193,7 @@ $body$
 	declare
 		tab_rec record;
 		func_def text;
+		resolver_name text;
 		pkey_col text;
 		pkey_clause text := '';
 	begin
@@ -216,23 +210,24 @@ $body$
 			raise notice 'Note3: %', pkey_clause;
 			
 			func_def := format(e'
-			create or replace function gql.resolve_entrypoint_one_%s_%s(field jsonb)
+			create or replace function %s(field jsonb)
 				returns jsonb
-				language sql
+				language plpgsql
 			    immutable
 				parallel safe
 				as
 			$$
-				select
-					gql.resolve_%s_%s(%s, field) -> coalesce(field->>\'alias\', field->>\'name\')
+            begin
+				return
+					%s(%s, field) -> coalesce(field->>\'alias\', field->>\'name\')
 				from
 					%s.%s
 				where
 					%s
 				limit 1;
-		   $$;
-			', tab_rec.table_schema, tab_rec.table_name,
-			   tab_rec.table_schema, tab_rec.table_name, tab_rec.table_name,
+            end;
+		   $$;', gql.to_resolver_name(gql.to_entrypoint_one_name(tab_rec.table_name)),
+			   gql.to_resolver_name(gql.to_base_name(tab_rec.table_name)), tab_rec.table_name,
 			   tab_rec.table_schema, tab_rec.table_name,
 			   pkey_clause
 			);
@@ -243,14 +238,67 @@ $body$
 $body$;
 
 
-create or replace function gql.build_resolve_all(_table_schema text) returns void
+create or replace function gql.build_resolve(_table_schema text) returns void
+	language plpgsql as
+$body$
+	declare
+		rec record;
+		func_def text;
+		field_name text;
+		resolver_name text;
+	begin
+		func_def := '
+			create or replace function gql.resolve(field jsonb)
+				returns jsonb
+				language plpgsql
+			    immutable
+				parallel safe
+				as
+			$$
+            begin
+			return 
+				case (select * from jsonb_object_keys(field) limit 1)
+			';
+		for rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
+			field_name := gql.to_entrypoint_one_name(rec.table_name);
+			resolver_name := gql.to_resolver_name(field_name);
+			func_def := func_def || format(e'
+				when \'%s\' then %s(field := field -> \'%s\')',
+			field_name, resolver_name, field_name);
+		end loop;
+			
+        func_def := func_def || e'\nelse null end; end;$$;';
+		raise notice 'Function %', func_def;
+		execute func_def;
+	end;
+$body$;
+
+
+create or replace function gql.build_resolvers(_table_schema text) returns void
 	language plpgsql stable as
 $$
 	begin
 		perform gql.build_resolve_stubs(_table_schema);
-		perform gql.build_resolve_rows(_table_schema);
 		perform gql.build_resolve_connection_relationships(_table_schema);
+		perform gql.build_resolve_rows(_table_schema);
 		perform gql.build_resolve_entrypoint_one(_table_schema);
+		perform gql.build_resolve(_table_schema);
 	end;
 $$;
+
+create or replace function gql.execute(operation text) returns jsonb as
+$$
+    declare
+        tokens gql.token[] := gql.tokenize_operation(operation);
+        ast jsonb := gql.parse_operation(tokens);
+        -- sql_query text := gql.sqlize_field(ast, parent_block_name := null);
+    begin
+        -- Raising these notices takes about 0.1 milliseconds
+		--raise notice 'Tokens %', tokens::text;
+		raise notice 'AST %', jsonb_pretty(ast);
+		--raise notice 'SQL %', sql_query;
+        return gql.resolve(ast);
+	end;
+$$ language plpgsql stable;
+
 

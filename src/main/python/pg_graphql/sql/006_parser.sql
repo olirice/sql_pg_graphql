@@ -55,6 +55,8 @@ as $BODY$
 
     -- Read Name
     _name := tokens[1].content;
+
+    raise notice '_name: %', tokens;
     tokens := tokens[2:];
 
     -- Read Args
@@ -105,6 +107,8 @@ as $BODY$
     else
         fields := '{}'::jsonb;
     end if;
+
+    raise notice '_name: %', _name;
 
 	return (
         select

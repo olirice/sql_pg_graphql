@@ -28,29 +28,7 @@ insert into post(id, owner_id, title) values
 (3, 2, 'Wrong Post');
 
 
-select gql.build_resolve_all('public');
-
-CREATE OR REPLACE FUNCTION gql.execute(
-	operation text)
-    RETURNS jsonb
-    LANGUAGE 'plpgsql'
-
-    COST 100
-    STABLE 
-    
-AS $BODY$
-    declare
-        tokens gql.token[] := gql.tokenize_operation(operation);
-        ast jsonb := gql.parse_operation(tokens);
-        --sql_query text := gql.sqlize_field(ast, parent_block_name := null);
-    begin
-        -- Raising these notices takes about 0.1 milliseconds
-		--raise notice 'Tokens %', tokens::text;
-		--raise notice 'AST %', jsonb_pretty(ast);
-		--raise notice 'SQL %', sql_query;
-		return gql.resolve_entrypoint_one_public_account(field:=ast->'account');
-	end;
-$BODY$;
+select gql.build_resolvers('public');
 """
 
 SQL_DOWN = """
@@ -62,7 +40,7 @@ drop table account cascade;
 INTEGRATION_QUERY = """
 select gql.execute($$
     query {
-        account(id: 1) {
+        accountOne(id: 1) {
             name
             post_collection_by_id_to_owner_id {
                 edges{
@@ -89,7 +67,7 @@ def build_tables(session):
 def test_operation(session, build_tables):
     query = """
         select gql.execute($$
-            query { account(id: 1) { name my_id: id, created_at} }
+            query { accountOne(id: 1) { name my_id: id, created_at} }
         $$);
     """
     (result,) = session.execute(query).fetchone()
