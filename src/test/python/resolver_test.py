@@ -32,8 +32,10 @@ select gql.build_resolvers('public');
 """
 
 SQL_DOWN = """
-drop table post cascade;
-drop table account cascade;
+-- drop table post cascade;
+-- drop table account cascade;
+drop type gql.post_cursor cascade;
+drop type gql.account_cursor cascade;
 """
 
 
@@ -62,6 +64,7 @@ def build_tables(session):
     session.commit()
     yield
     session.execute(SQL_DOWN)
+    session.commit()
 
 
 def test_operation(session, build_tables):

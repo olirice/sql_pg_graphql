@@ -36,14 +36,21 @@ create or replace view gql.table_info as
 	Column Info
 */
 create or replace view gql.column_info as
-    select table_schema::text,
+    select
+        table_schema::text,
         table_name::text,
         column_name::text,
         is_nullable='NO' as not_null,
-        data_type::text sql_data_type
-    from information_schema.columns
-    where table_schema not in ('pg_catalog','information_schema','gql')
-    order by table_name,
+        data_type::text sql_data_type,
+        column_name::text = any(pk.pk_cols) is_pkey,
+        ordinal_position
+    from
+        information_schema.columns,
+        lateral gql.to_primary_key_cols(table_schema::text, table_name::text) pk(pk_cols)
+    where
+        table_schema not in ('pg_catalog','information_schema','gql')
+    order by
+        table_name,
         ordinal_position;
 
 create type gql.cardinality as enum ('ONE', 'MANY');
