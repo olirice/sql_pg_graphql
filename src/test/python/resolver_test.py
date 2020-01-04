@@ -50,7 +50,7 @@ drop table account cascade;
 INTEGRATION_QUERY = """
 select gql.execute($$
     query {
-        account(id: 1) {
+        account(nodeId: "(1)") {
             name
             post_collection_by_id_to_owner_id {
                 total_count
@@ -80,7 +80,7 @@ def build_tables(session):
 def test_operation(session, build_tables):
     query = """
         select gql.execute($$
-            query { account(id: 1) { name my_id: id, created_at} }
+            query { account(nodeId: "(1)") { name my_id: id, created_at} }
         $$);
     """
     (result,) = session.execute(query).fetchone()
