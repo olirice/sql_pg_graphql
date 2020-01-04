@@ -14,7 +14,8 @@ def build_sql_query(text_to_tokenize) -> TextClause:
 
 
 def test_tokenizer_integration(session):
-    query = text("""
+    query = text(
+        """
         select gql.tokenize_operation($q$
             query {
                 account(id: 1, name: "Oliver") {
@@ -29,14 +30,17 @@ def test_tokenizer_integration(session):
                 }
             }
         $q$)
-    """)
+    """
+    )
     (result,) = session.execute(query).fetchone()
     tokens = Token.from_text(result)
+    print(tokens)
     assert tokens[-1].token_kind != TokenKind.ERROR
 
 
 def _integration(session):
-    query = text("""
+    query = text(
+        """
         select gql.tokenize_operation($q$
             query {
                 account(id: 1, name: "Oliver") {
@@ -48,7 +52,8 @@ def _integration(session):
                 }
             }
         $q$)
-    """)
+    """
+    )
     (result,) = session.execute(query).fetchone()
 
     assert True

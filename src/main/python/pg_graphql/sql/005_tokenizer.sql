@@ -91,16 +91,16 @@ as $BODY$
                 continue;
             end if;
 
-            maybe_tok = substring(payload from '^""".*?"""');
+            maybe_tok = substring(payload from '^"""(.*)?"""');
             if maybe_tok is not null then
-                payload := substring(payload, character_length(maybe_tok)+1, 99999);
+                payload := substring(payload, character_length(maybe_tok)+7, 99999);
                 tokens := tokens || ('BLOCK_STRING', maybe_tok)::gql.token;
                 continue;
             end if;
 
-            maybe_tok = substring(payload from '^".*?"');
+            maybe_tok = substring(payload from '^"(.*)?"');
             if maybe_tok is not null then
-                payload := substring(payload, character_length(maybe_tok)+1, 99999);
+                payload := substring(payload, character_length(maybe_tok)+3, 99999);
                 tokens := tokens || ('STRING', maybe_tok)::gql.token;
                 continue;
             end if;

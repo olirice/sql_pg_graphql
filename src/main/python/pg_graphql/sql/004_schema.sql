@@ -32,6 +32,11 @@ create or replace function gql.to_base_name(_table_name text) returns text as
 $$ select gql.pascal_case(_table_name)
 $$ language sql immutable returns null on null input;
 
+create or replace function gql.to_condition_name(_table_name text) returns text as
+$$ select gql.pascal_case(_table_name || '_condition')
+$$ language sql immutable returns null on null input;
+
+
 create or replace function gql.to_edge_name(_table_name text) returns text as
 $$ select gql.pascal_case(_table_name || '_edge')
 $$ language sql immutable returns null on null input;
@@ -41,11 +46,11 @@ $$ select gql.pascal_case(_table_name || '_connection')
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.to_entrypoint_one_name(_table_name text) returns text as
-$$ select gql.camel_case(_table_name || '_one')
+$$ select gql.camel_case(_table_name)
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.to_entrypoint_connection_name(_table_name text) returns text as
-$$ select gql.camel_case(_table_name || '_connection')
+$$ select gql.camel_case('all_' || _table_name)
 $$ language sql immutable returns null on null input;
 
 create or replace function gql.to_field_name(_column_name text) returns text as
@@ -107,6 +112,12 @@ begin
 end;
 $$;
 
+
+create or replace function gql.to_connection_args(_table_name text) returns text
+    language sql as
+$$ select format('(first: Int after: Cursor last: Int before: Cursor, condition: %s)', gql.to_condition_name(_table_name));
+$$;
+
 create or replace function gql.relationship_to_gql_field_def(_constraint_name text) returns text
 	language plpgsql as
 $$
@@ -123,7 +134,7 @@ begin
 	field_name := gql.relationship_to_gql_field_name(_constraint_name);
 
     if rec.foreign_cardinality = 'MANY' then
-        field_name := field_name || '(first: Int after: Cursor last: Int before: Cursor)';
+        field_name := field_name || gql.to_connection_args(rec.foreign_table);
     end if;
 	return field_name;
 end;
@@ -162,20 +173,19 @@ declare
 	base_type_name text := gql.to_base_name(_table_name);
 	column_arr text[] := gql.list_columns(_table_schema, _table_name);
 	col_name text := null;
+    col_field_name text;
 	col_gql_type text := null;
-	res text := 'type ' || base_type_name || e' {\n';
+	res text := 'type ' || base_type_name || e' {\n\tnodeId: ID!\n';
 	relation_arr text[] := gql.list_relationships(_table_schema, _table_name);
 	relation_name text := null;
 	relation_field_def text := null;
 	relation_gql_type text := null;
 begin
 	for col_name in select unnest(column_arr) loop
-		raise notice 'Column %', col_name;
-		
+        col_field_name := gql.to_field_name(col_name);
 		col_gql_type := gql.to_gql_type(_table_schema, _table_name, col_name);
-		
 		-- Add column to result type
-		res := res || e'\t' || col_name || ': ' || col_gql_type || e'\n';
+		res := res || e'\t' || col_field_name || ': ' || col_gql_type || e'\n';
 	end loop;
 	
 	for relation_name in select unnest(relation_arr) loop
@@ -188,6 +198,33 @@ begin
 	return res;
 end;
 $$;
+
+create or replace function gql.strip_not_null(gql_type text) returns text as
+$$ select replace(gql_type, '!', ''); $$ language sql;
+
+create or replace function gql.to_condition_type(_table_schema text, _table_name text) returns text
+	language plpgsql as
+$$
+declare
+	condition_type_name text := gql.to_condition_name(_table_name);
+	column_arr text[] := gql.list_columns(_table_schema, _table_name);
+	col_name text := null;
+    col_field_name text;
+	col_gql_type text := null;
+	res text := 'input ' || condition_type_name || e' {\n\tnodeId: ID\n';
+begin
+	for col_name in select unnest(column_arr) loop
+        col_field_name := gql.to_field_name(col_name);
+		col_gql_type := gql.strip_not_null(gql.to_gql_type(_table_schema, _table_name, col_name));
+		-- Add column to result type
+		res := res || e'\t' || col_field_name || ': ' || col_gql_type || e'\n';
+	end loop;
+	res := res || '}';	
+	return res;
+end;
+$$;
+
+
 
 
 create or replace function gql.to_edge_type(_table_schema text, _table_name text) returns text
@@ -227,36 +264,57 @@ $$;
 
 create or replace function gql.to_entrypoint_one(_table_schema text, _table_name text) returns text as $$
 	select
-		gql.to_entrypoint_one_name(ti.table_name) || '('
-		|| (
-				select
-					string_agg('  ' || gql.to_field_name(pk._column_name)  || ': ' || gql.to_gql_type(ti.table_schema, ti.table_name, pk._column_name), ', ')
-				from
-					unnest(ti.pkey_cols) pk(_column_name)
-			)
-		|| ' ): ' || gql.to_base_name(ti.table_name) || E'\n' as entry_single_row
-	from
-		gql.table_info ti
-	where
-		ti.table_schema = _table_schema
-		and ti.table_name = _table_name
-	group by
-		ti.table_schema,
-		ti.table_name,
-		ti.pkey_cols
+        format('%s(nodeId: ID!): %s',
+            gql.to_entrypoint_one_name(_table_name),
+            gql.to_base_name(_table_name)
+        );
 $$ language sql stable returns null on null input;
 
 
-create or replace function gql.to_query(_table_schema text) returns text as $$
+create or replace function gql.to_entrypoint_connection(_table_schema text, _table_name text) returns text as $$
 	select
-		E'type Query {\n'
-		|| string_agg('  ' || gql.to_entrypoint_one(ti.table_schema, ti.table_name), E'\n')
-		|| E'\n}' as def
-	from
-		gql.table_info ti
-	where
-		ti.table_schema = _table_schema
+        format('%s%s: %s',
+            gql.to_entrypoint_connection_name(_table_name),
+            gql.to_connection_args(_table_name),
+            gql.to_connection_name(_table_name)
+        );
 $$ language sql stable returns null on null input;
+
+
+create or replace function gql.to_query(_table_schema text) returns text
+ language plpgsql as $$
+declare
+    entrypoint_one_clause text := '';
+    entrypoint_connection_clause text := '';
+    tab_rec record;
+begin
+
+    for tab_rec in (select * from gql.table_info ti where ti.table_schema = _table_schema) loop
+        entrypoint_one_clause := concat(
+            entrypoint_one_clause,
+            '    ',
+            gql.to_entrypoint_one(
+                tab_rec.table_schema,
+                tab_rec.table_name
+            ),
+            e'\n');
+        entrypoint_connection_clause := concat(
+            entrypoint_connection_clause,
+            '    ',
+            gql.to_entrypoint_connection(
+                tab_rec.table_schema,
+                tab_rec.table_name
+            ),
+            e'\n');
+    end loop;
+
+	return format('
+type Query{
+%s
+%s
+}', entrypoint_one_clause, entrypoint_connection_clause);
+end;
+$$;
 
 
 create or replace function gql.to_schema(_table_schema text) returns text as $$
@@ -272,6 +330,8 @@ create or replace function gql.to_schema(_table_schema text) returns text as $$
 			select gql.to_edge_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
 			union all
 			select gql.to_connection_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
+			union all
+			select gql.to_condition_type(table_schema, table_name) def from gql.table_info where table_schema = _table_schema
 			union all
 			select gql.to_query(_table_schema)
 		 ) zzz

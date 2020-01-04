@@ -1,8 +1,11 @@
 import pytest
 
 SQL_UP = """
+select gql.drop_resolvers();
+
 drop table if exists post cascade;
 drop table if exists account cascade;
+
 
 create table account(
     id serial primary key,
@@ -25,26 +28,32 @@ insert into account(id, name) values
 insert into post(id, owner_id, title) values
 (1, 1, 'First Post'),
 (2, 1, 'Second Post'),
-(3, 2, 'Wrong Post');
-
+(3, 2, 'Wrong Post'),
+(4, 2, 'Post4'),
+(5, 2, 'Post5'),
+(6, 2, 'Post6'),
+(7, 2, 'Post7'),
+(8, 2, 'Post8'),
+(9, 2, 'Post9'),
+(10, 2, 'Post10');
 
 select gql.build_resolvers('public');
 """
 
 SQL_DOWN = """
--- drop table post cascade;
--- drop table account cascade;
-drop type gql.post_cursor cascade;
-drop type gql.account_cursor cascade;
+select gql.drop_resolvers();
+drop table post cascade;
+drop table account cascade;
 """
 
 
 INTEGRATION_QUERY = """
 select gql.execute($$
     query {
-        accountOne(id: 1) {
+        account(id: 1) {
             name
             post_collection_by_id_to_owner_id {
+                total_count
                 edges{
                     node{
                         title
@@ -56,6 +65,7 @@ select gql.execute($$
     }
 $$);
 """
+
 
 @pytest.fixture
 def build_tables(session):
@@ -70,7 +80,7 @@ def build_tables(session):
 def test_operation(session, build_tables):
     query = """
         select gql.execute($$
-            query { accountOne(id: 1) { name my_id: id, created_at} }
+            query { account(id: 1) { name my_id: id, created_at} }
         $$);
     """
     (result,) = session.execute(query).fetchone()
@@ -79,8 +89,6 @@ def test_operation(session, build_tables):
     assert result["name"] == "Oliver"
     assert result["my_id"] == 1
     assert isinstance(result["created_at"], str)
-
-
 
 
 def test_nested_operation(session, build_tables):
@@ -95,7 +103,6 @@ def test_nested_operation_join_correctness(session, build_tables):
     assert isinstance(result, dict)
     # There are 3 entries in the post table but only 2 have account.id=1
     assert len(result["post_collection_by_id_to_owner_id"]["edges"]) == 2
-
 
 
 def _query_integration(session):

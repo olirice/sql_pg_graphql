@@ -58,7 +58,7 @@ def test_parser_integration(session):
     (result,) = session.execute(query).fetchone()
     result = json.loads(result)
     print(json.dumps(result, indent=2))
-    assert is_valid_ast(result['account'])
+    assert is_valid_ast(result["account"])
 
 
 def test_parser_speed(session, benchmark):

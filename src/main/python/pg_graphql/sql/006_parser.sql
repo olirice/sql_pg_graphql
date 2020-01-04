@@ -32,6 +32,9 @@ create type gql.partial_parse as (
 );
 
 
+
+
+
 create or replace function gql.parse_field(tokens gql.token[]) returns gql.partial_parse
     language plpgsql immutable strict parallel safe
 as $BODY$
@@ -44,6 +47,9 @@ as $BODY$
         last_iter_fields jsonb := null;
         fields jsonb := '{}';
         cur_field gql.partial_parse;
+        arg_depth int := 1;
+        condition jsonb := '{}';
+        ix int;
     begin
     -- Read Alias
     if (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
@@ -55,41 +61,54 @@ as $BODY$
 
     -- Read Name
     _name := tokens[1].content;
-
-    raise notice '_name: %', tokens;
     tokens := tokens[2:];
 
     -- Read Args
     if tokens[1].kind = 'PAREN_L' then
         -- Skip over the PAREN_L
         tokens := tokens[2:];
-        loop
-            exit when (tokens[1].kind = 'PAREN_R' or args = last_iter_args);
 
-            if (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
-                -- Special handling of string args to strip the double quotes
-                if tokens[3].kind = 'STRING' then
-                    cur := jsonb_build_object(
-                        tokens[1].content,
-                        substring(tokens[3].content, 2, character_length(tokens[3].content)-2)
-                    );
-                -- Any other scalar arg
-                else
-                    cur := jsonb_build_object(
-                        tokens[1].content,
-                        tokens[3].content
-                    );
-                end if;
-                tokens := tokens[4:];
-            else
-                raise notice 'gql.parse_field: invalid state parsing arg with tokens %', tokens;
+        -- Find the end of the arguments clause
+        -- Avoid infinite loop. ix is unused.
+        for ix in (select * from generate_series(1, array_length(tokens,1))) loop
+            if tokens[1].kind = 'PAREN_R' then
+                tokens := tokens[2:];
+                exit;
             end if;
 
-            last_iter_args := args;
+            -- Parse condition argument 
+            if (tokens[1].kind, tokens[1].content, tokens[2].kind, tokens[3].kind) = ('NAME', 'condition', 'COLON', 'BRACE_L') then
+                tokens := tokens[4:];
+                for ix in (select * from generate_series(1, array_length(tokens,1))) loop
+                    if tokens[1].kind = 'BRACE_R' then
+                        tokens := tokens[2:];
+                        exit;
+                    end if;
+                    if (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
+				        cur := jsonb_build_object(
+                            tokens[1].content,
+                            tokens[3].content
+                        );
+                    end if;
+                    condition := condition || cur;
+                    tokens := tokens[4:];
+                end loop;
+
+                cur := jsonb_build_object('condition', cur);
+
+            -- Parse a standard argument
+            elsif (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
+				cur := jsonb_build_object(
+                    tokens[1].content,
+                    tokens[3].content
+                );
+                tokens := tokens[4:];
+            else
+                raise exception 'gql.parse_field: invalid state parsing arg with tokens %', tokens;
+            end if;
+
             args := args || cur;
         end loop;
-        -- Advance past the PAREN_R
-        tokens := tokens[2:];
     else
         args := '{}'::jsonb;
     end if;
@@ -107,8 +126,6 @@ as $BODY$
     else
         fields := '{}'::jsonb;
     end if;
-
-    raise notice '_name: %', _name;
 
 	return (
         select

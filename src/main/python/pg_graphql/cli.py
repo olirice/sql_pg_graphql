@@ -1,7 +1,6 @@
 # pylint: disable=invalid-name,redefined-outer-name
-import time
-
 import sys
+import time
 
 import click
 import pytest
@@ -28,10 +27,14 @@ def main(**kwargs):
     default="postgresql://postgres:@localhost:5432/pg_graphql",
 )
 def install(connection):
-    """Run test suite"""
+    """Install pg_graphql in *connection* database"""
     # Store connection string on class variable to make it accessible to pytest
     engine = create_engine(connection)
-    engine.execute(sqla_text(build_sql_source()))
+    con = engine.connect()
+    with con.begin() as trans:
+        con.execute(sqla_text(build_sql_source()))
+        trans.commit()
+    con.close()
     engine.dispose()
 
 
@@ -58,7 +61,7 @@ def test(connection):
     default="postgresql://postgres:@localhost:5432/pg_graphql",
 )
 def watch(connection):
-    """Run test suite"""
+    """Run the test suite every time the `src/` directory changes"""
 
     clear_terminal()
     run_test(connection)
@@ -101,3 +104,65 @@ def format():
             f.write(formatted_sql)
 
     click.echo("Completed")
+
+
+@main.command()
+@click.option(
+    "-c",
+    "--connection",
+    help="e.g. postgresql://postgres:@localhost:5432/pg_graphql",
+    default="postgresql://postgres:@localhost:5432/pg_graphql",
+)
+def demo(connection):
+    """Setup and populate demo schema"""
+    # Store connection string on class variable to make it accessible to pytest
+
+    engine = create_engine(connection)
+    con = engine.connect()
+    with con.begin() as trans:
+        con.execute(sqla_text("""
+select gql.drop_resolvers();
+
+drop table if exists post cascade;
+drop table if exists account cascade;
+
+create table account(
+    id serial primary key,
+    name text not null,
+    created_at timestamp default now()
+);
+
+create table post(
+    id serial primary key,
+    owner_id integer references account(id),
+    title text not null,
+    body text,
+    created_at timestamp default now()
+);
+
+insert into account(id, name) values
+(1, 'Oliver'),
+(2, 'Rach');
+
+insert into post(id, owner_id, title) values
+(1, 1, 'First Post'),
+(2, 1, 'Second Post'),
+(3, 2, 'Wrong Post'),
+(4, 2, 'Post4'),
+(5, 2, 'Post5'),
+(6, 2, 'Post6'),
+(7, 2, 'Post7'),
+(8, 2, 'Post8'),
+(9, 2, 'Post9'),
+(10, 2, 'Post10');
+
+select gql.build_resolvers('public');
+"""))
+        trans.commit()
+    con.close()
+    engine.dispose()
+
+
+    engine.dispose()
+
+

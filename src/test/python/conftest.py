@@ -15,6 +15,7 @@ def connection():
 def engine(connection):
     _engine = sqlalchemy.create_engine(connection, echo=False)
     yield _engine
+
     _engine.dispose()
 
 

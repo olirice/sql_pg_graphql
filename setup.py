@@ -14,6 +14,11 @@ DEV_REQUIRES = [
     "sqlparse",
 ]
 
+ENTRY_POINTS = {
+    "console_scripts": ["pg_graphql=pg_graphql.cli:main"],
+    "pygments.lexers": ["graphqllexer=pg_graphql.lexer:GraphQLLexer"],
+}
+
 
 setup(
     name="pg_graphql",
@@ -30,8 +35,8 @@ setup(
     python_requires=">=3.6",
     packages=find_packages("src/main/python"),
     package_dir={"": "src/main/python"},
-    entry_points={"console_scripts": ["pg_graphql=pg_graphql.cli:main"]},
-    install_requires=["flupy"],
+    entry_points=ENTRY_POINTS,
+    install_requires=["flupy", "graphql-core>=3a"],
     extras_require={"dev": DEV_REQUIRES, "nvim": ["neovim", "python-language-server"]},
     include_package_data=True,
 )

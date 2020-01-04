@@ -39,7 +39,7 @@ SELECT gql.get_schema(schema_name TEXT);
 ```
 
 An abridged version of the output is show below.
-```
+```gql
 type account {
   id: Int!
   name: String!
