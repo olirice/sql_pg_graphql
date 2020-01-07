@@ -474,6 +474,7 @@ begin
 type %s {
     edges: [%s!]!
     total_count: Int!
+    pageInfo: PageInfo!
 }    
 $typedef$, connection_type_name, edge_type_name);
 end;
@@ -537,9 +538,16 @@ $$;
 
 create or replace function gql.to_schema(_table_schema text) returns text as $$
     
-	select
-	    e'scalar Cursor\n\n' ||
+	select '
+scalar Cursor
 
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: Cursor
+  endCursor: Cursor
+}
+' ||
         string_agg(zzz.def, E'\n')
 	from
 		(
@@ -649,14 +657,14 @@ as $BODY$
                 continue;
             end if;
 
-            maybe_tok = substring(payload from '^"""(.*)?"""');
+            maybe_tok = substring(payload from '^"""(.*?)"""');
             if maybe_tok is not null then
                 payload := substring(payload, character_length(maybe_tok)+7, 99999);
                 tokens := tokens || ('BLOCK_STRING', maybe_tok)::gql.token;
                 continue;
             end if;
 
-            maybe_tok = substring(payload from '^"(.*)?"');
+            maybe_tok = substring(payload from '^"(.*?)"');
             if maybe_tok is not null then
                 payload := substring(payload, character_length(maybe_tok)+3, 99999);
                 tokens := tokens || ('STRING', maybe_tok)::gql.token;
@@ -780,7 +788,7 @@ as $BODY$
         last_iter_fields jsonb := null;
         fields jsonb := '{}';
         cur_field gql.partial_parse;
-        arg_depth int := 1;
+        field_depth int := 0;
         condition jsonb := '{}';
         ix int;
     begin
@@ -848,11 +856,20 @@ as $BODY$
 
     -- Read Fields
     if tokens[1].kind = 'BRACE_L' then
-        tokens := tokens[2:];
-        loop
-            exit when (tokens[1].kind = 'BRACE_R' or fields = last_iter_fields);
+        for ix in (select * from generate_series(1, array_length(tokens,1))) loop
+
+            if (tokens[1].kind = 'BRACE_L') then
+                tokens := tokens[2:];
+                field_depth := field_depth + 1;
+            end if;
+            if (tokens[1].kind = 'BRACE_R') then
+                tokens := tokens[2:];
+                field_depth := field_depth - 1;
+            end if;
+
+            exit when field_depth = 0;
+
             cur_field := gql.parse_field(tokens);
-            last_iter_fields := fields;
             fields := fields || cur_field.contents;
             tokens := cur_field.remaining;
         end loop;
@@ -904,8 +921,6 @@ $BODY$;
 ******************************
 
 */
-
-
 
 
 create or replace function gql.to_cursor_type_name(_table_name text) returns text
@@ -992,9 +1007,6 @@ $$
 -- Due to inability to work with indexes
 select format(e'\ngql.resolve_cursor(%s::%s.%s)::text', rec_name, _table_schema, _table_name);
 $$;
-
-
-
 
 
 
@@ -1090,38 +1102,15 @@ $body$
 		relationship_field_name text;
         resolver_name text;
         cursor_selector text;
+        column_selector text;
+        relationship_selector text;
 	begin
 		for tab_rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
 
-            resolver_name := gql.to_resolver_name(gql.to_base_name(tab_rec.table_name));
-
 			cursor_selector := gql.record_to_cursor_select_clause(tab_rec.table_schema, tab_rec.table_name, 'rec');
-		
-			func_def := format(e'
-			create or replace function %s(rec %s.%s, field jsonb)
-				returns jsonb
-				language plpgsql
-			    immutable
-				parallel safe
-				as
-			$$
-            begin
-				return jsonb_build_object(
-							   coalesce(field ->> \'alias\', field ->> \'name\'), (
-                                    -- NodeId
-                                    case when field #> \'{fields,nodeId}\' is not null
-                                         then jsonb_build_object(
-                                            coalesce(
-                                                field #>> \'{fields,nodeId,alias}\',
-                                                field #>> \'{fields,nodeId,name}\'
-                                            ),
-                                            %s
-                                         )
-                                         else \'{}\'::jsonb
-                                         end ||               
-			', resolver_name, tab_rec.table_schema, tab_rec.table_name, cursor_selector);
-			
-			-- column resolvers
+
+            -- column resolvers
+            column_selector := '';
 			for col_rec in (
 				select *
 				from gql.column_info ci
@@ -1130,22 +1119,23 @@ $body$
 					and ci.table_name = tab_rec.table_name)
 				loop
 					clause := format(e'
-					case when field #> \'{fields,%s}\' is not null
-									 then jsonb_build_object(
-										coalesce(
-									 		field #>> \'{fields,%s,alias}\',
-									 		field #>> \'{fields,%s,name}\'
-										),
-										rec.%s
-									 )
-									 else \'{}\'::jsonb
-									 end ||',
+            || case when field #> \'{fields,%s}\' is not null
+                 then jsonb_build_object(
+                    coalesce(
+                        field #>> \'{fields,%s,alias}\',
+                        field #>> \'{fields,%s,name}\'
+                    ),
+                    rec.%s
+                 )
+                 else \'{}\'::jsonb
+                     end',
 					col_rec.column_name, col_rec.column_name, col_rec.column_name, col_rec.column_name
 					);
-					func_def := func_def || clause;
+					column_selector := column_selector || clause;
 				end loop;
 			
 			-- Relationship Resolvers
+            relationship_selector := '';
 			for rel_rec in (
 				select *
 				from gql.relationship_info ci
@@ -1156,65 +1146,54 @@ $body$
 					relationship_field_name := gql.relationship_to_gql_field_name(rel_rec.constraint_name);
                     resolver_name := gql.to_resolver_name(relationship_field_name);
 					clause := format(e'
-					case when field #> \'{fields,%s}\' is not null
+            || case when field #> \'{fields,%s}\' is not null
 									 then %s(rec, field #> \'{fields,%s}\' )
 									 else \'{}\'::jsonb
-									 end ||',
+									 end',
 					relationship_field_name, resolver_name, relationship_field_name);
-					func_def := func_def || clause;
+					relationship_selector := relationship_selector || clause;
 				end loop;
 				
-				func_def := substring(func_def, 1, character_length(func_def)-3);
-                func_def := func_def || e')); end;$$;';
-			raise notice 'Function %', func_def;
+
+		
+			func_def := format(e'
+create or replace function %s(rec %s.%s, field jsonb)
+    returns jsonb
+    language plpgsql
+    immutable
+    parallel safe
+    as
+$$
+begin
+    return jsonb_build_object(
+                   coalesce(field ->> \'alias\', field ->> \'name\'), (
+                        -- NodeId
+                        case when field #> \'{fields,nodeId}\' is not null
+                             then jsonb_build_object(
+                                coalesce(
+                                    field #>> \'{fields,nodeId,alias}\',
+                                    field #>> \'{fields,nodeId,name}\'
+                                ),
+                                %s
+                             )
+                             else \'{}\'::jsonb
+                             end
+%s
+%s
+                   )
+            );
+end;
+$$;',
+                gql.to_resolver_name(gql.to_base_name(tab_rec.table_name)), tab_rec.table_schema, tab_rec.table_name,
+                cursor_selector, column_selector, relationship_selector
+            );
+            raise notice 'Function %', func_def;
 			execute func_def;
 		end loop;
 	end;
 $body$;
 
 
-
-create or replace function gql.build_resolve_stubs(_table_schema text) returns void
-	language plpgsql as
-$body$
-	declare
-		rec record;
-		func_def text;
-		resolver_name text;
-	begin
-		for rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
-
-            -- Row Resolver
-            resolver_name := gql.to_resolver_name(gql.to_base_name(rec.table_name));
-			func_def := format(e'
-create or replace function %s(rec %s.%s, field jsonb) returns jsonb
-language plpgsql stable as
-$$ begin return null::jsonb; end;
-$$;', resolver_name, rec.table_schema, rec.table_name);
-			execute func_def;
-
-            -- Connection Entrypoint Resolver
-            resolver_name := gql.to_resolver_name(gql.to_connection_name(rec.table_name));
-			func_def := format(e'
-create or replace function %s(rec %s.%s, field jsonb) returns jsonb
-language plpgsql stable as
-$$ begin return null::jsonb; end;
-$$;', resolver_name, rec.table_schema, rec.table_name);
-			execute func_def;
-		end loop;
-
-        -- Connection Resolver
-		for rec in select * from gql.relationship_info ci where ci.table_schema=table_schema loop
-            resolver_name := gql.to_resolver_name(gql.relationship_to_gql_field_name(rec.constraint_name));
-			func_def := format(e'
-create or replace function %s(rec %s.%s, field jsonb) returns jsonb
-	language plpgsql stable as
-    $$ begin return null::jsonb; end;
-$$;', resolver_name, rec.table_schema, rec.local_table);
-			execute func_def;
-		end loop;
-	end;
-$body$;
 
 
 create or replace function gql.build_resolve_entrypoint_one(_table_schema text) returns void
@@ -1267,7 +1246,7 @@ $body$
 			   cursor_selector, cursor_arg_parsed
 
 			);
-			raise notice 'Function %', func_def;
+			--raise notice 'Function %', func_def;
 			execute func_def;
 		end loop;
 	end;
@@ -1295,12 +1274,12 @@ $body$
 				as
 			$$
             begin
-				return %s(null, field) -> coalesce(field->>\'alias\', field->>\'name\');
+				return %s(field) -> coalesce(field->>\'alias\', field->>\'name\');
             end;
 		   $$;', gql.to_resolver_name(gql.to_entrypoint_connection_name(tab_rec.table_name)),
 			   gql.to_resolver_name(gql.to_connection_name(tab_rec.table_name))
             );
-			raise notice 'Function %', func_def;
+			--raise notice 'Function %', func_def;
 			execute func_def;
 		end loop;
 	end;
@@ -1325,34 +1304,37 @@ $body$
 				parallel safe
 				as
 			$$
+            declare
+                val_to_match text := (select * from jsonb_object_keys(field) limit 1);
             begin
 			return 
-				case (select * from jsonb_object_keys(field) limit 1)
+				case 
 			';
 		for rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
 			field_name := gql.to_entrypoint_one_name(rec.table_name);
 			resolver_name := gql.to_resolver_name(field_name);
 			func_def := func_def || format(e'
-				when \'%s\' then %s(field := field -> \'%s\')',
+				when val_to_match = \'%s\' then %s(field := field -> \'%s\')',
 			field_name, resolver_name, field_name);
 
             field_name := gql.to_entrypoint_connection_name(rec.table_name);
 			resolver_name := gql.to_resolver_name(field_name);
 			func_def := func_def || format(e'
-				when \'%s\' then %s(field := field -> \'%s\')',
+				when val_to_match = \'%s\' then %s(field := field -> \'%s\')',
 			field_name, resolver_name, field_name);
 
 		end loop;
 			
         func_def := func_def || e'\nelse \'{"error": "no resolver matched"}\'::jsonb end; end;$$;';
-		raise notice 'Function %', func_def;
+		--raise notice 'Function %', func_def;
 		execute func_def;
 	end;
 $body$;
 
 
 
-CREATE OR REPLACE FUNCTION gql.build_resolve_connection_relationships(_table_schema text) RETURNS void
+
+CREATE OR REPLACE FUNCTION gql.build_resolve_connections(_table_schema text) RETURNS void
     LANGUAGE 'plpgsql'
 AS $BODY$
 	declare
@@ -1365,65 +1347,19 @@ AS $BODY$
 		cursor_extractor text;
 		pagination_clause text;
 		cursor_selector text;
+		start_cursor_selector text;
+        end_cursor_selector text;
 		cursor_type_name text;
 		func_def text;
+		resolver_function_args text;
 		ix int;
         template text;
 		
 	begin
-		for rec in select * from gql.relationship_info ri
-			where
-				ri.table_schema=table_schema
-				and ri.foreign_cardinality = 'MANY'
-			loop
-			
-			-- Build Join Clause
-			join_clause := '';
-			for ix in select generate_series(1, array_length(rec.local_columns, 1)) loop
-				join_clause := join_clause || format('rec.%s = %s.%s and ',
-													 rec.local_columns[ix],
-													 rec.foreign_table,
-													 rec.foreign_columns[ix]);
-			end loop;
-			join_clause := substring(join_clause, 1, character_length(join_clause)-4);
-			
-			
-			-- Build Condition Clause
-			condition_clause := '';
-			for col_rec in select * from gql.column_info ci where ci.table_schema=rec.table_schema and ci.table_name=rec.foreign_table loop
-				condition_clause := condition_clause || format(
-					e'and coalesce(%s = (filter_condition ->> \'%s\')::%s, true)\n',
-					col_rec.column_name, gql.to_field_name(col_rec.column_name), col_rec.sql_data_type
-				);
-			end loop;
-			
-			
-			select * from gql.table_info ti where ti.table_schema=rec.table_schema and ti.table_name=rec.foreign_table limit 1 into tab_rec;			
-			-- Ordering Clause
-			order_clause := (select '(' || string_agg(x, ',') || ')' from unnest(tab_rec.pkey_cols) abc(x));
-			
-			-- Pagination Clause
-            cursor_type_name := gql.to_cursor_type_name(tab_rec.table_name);
-            cursor_extractor := gql.text_to_cursor_clause(
-                tab_rec.table_schema,
-                tab_rec.table_name,
-                'after_cursor'
-            );
-			
-			pagination_clause := format(e'and coalesce(%s > %s, true)\n', order_clause, cursor_extractor);
-            cursor_extractor := gql.text_to_cursor_clause(
-                tab_rec.table_schema,
-                tab_rec.table_name,
-                'before_cursor'
-            );
-			pagination_clause := pagination_clause || format(e'\t\t\t\tand coalesce(%s > %s, true)\n', order_clause, cursor_extractor);
-			
-			-- Cursor Selector
-			cursor_selector := gql.to_cursor_clause(rec.table_schema, rec.foreign_table, 'subq_sorted');
-			
-			
+
+
             template := e'
-create or replace function %s(rec %s.%s, field jsonb) returns jsonb
+create or replace function %s(%s) returns jsonb
 	language plpgsql stable as
 $$
 declare
@@ -1435,6 +1371,7 @@ declare
 	arg_last int := (field #>> \'{args,last}\')::int;
 	before_cursor %s := (field #>> \'{args,before}\')::%s;
 	after_cursor %s :=  (field #>> \'{args,after}\')::%s;
+    row_limit int := least(coalesce(arg_first, arg_last), 20);
 
 	-- Conditions
 	filter_condition jsonb := (field #> \'{args,condition}\');
@@ -1443,14 +1380,24 @@ declare
 	has_cursor bool := field #>> \'{fields,edges,fields,cursor}\' is not null;
 	has_node bool := field #>> \'{fields,edges,fields,node}\' is not null;
 	has_total bool := field #>> \'{fields,total_count}\' is not null;
+	has_edges bool := field #>> \'{fields,edges}\' is not null;
+	has_page_info bool := field #>> \'{fields,pageInfo}\' is not null;
+    has_next_page bool := field #>> \'{fields,pageInfo,fields,hasNextPage}\' is not null;
+    has_prev_page bool := field #>> \'{fields,pageInfo,fields,hasNextPage}\' is not null;
+    has_start_cursor bool := field #>> \'{fields,pageInfo,fields,startCursor}\' is not null;
+    has_end_cursor bool := field #>> \'{fields,pageInfo,fields,endCursor}\' is not null;
 
 	edges jsonb := field #> \'{fields,edges}\';
 	node jsonb := edges #> \'{fields,node}\';
 
-	cursor_field_name text := coalesce(edges #>> \'{fields,cursor,alias}\', field #>> \'{fields,cursor,name}\');
+	page_info_field_name text := coalesce(field #>> \'{fields,pageInfo,alias}\', field #>> \'{fields,pageInfo,name}\');
+	cursor_field_name text := coalesce(edges #>> \'{fields,cursor,alias}\', edges #>> \'{fields,cursor,name}\');
 	edges_field_name text := coalesce(edges ->> \'alias\', edges ->> \'name\');
-	node_field_name text := coalesce(edges ->> \'node\', edges ->> \'node\');
-	
+	node_field_name text := coalesce(edges #>> \'{fields,node,alias}\', edges #>> \'{fields,node,name}\');
+	next_page_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,hasNextPage,alias}\', \'hasNextPage\');
+	previous_page_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,hasPreviousPage,alias}\', \'hasPreviousPage\');
+    start_cursor_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,startCursor,alias}\', \'startCursor\');
+    end_cursor_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,endCursor,alias}\', \'endCursor\');
 	total_field_name text := coalesce(field #>> \'{fields,total_count,alias}\', field #>> \'{fields,total_count,name}\');
 							   
 begin
@@ -1486,31 +1433,99 @@ begin
 				case when before_cursor is not null then %s end desc,
 				%s asc
 			limit
-				coalesce(arg_first, arg_last, 20)
+                -- Retrieve extra row to check if there is another page
+				row_limit + 1
 		),
+        
         -- Ensure deterministic sort order
 		subq_sorted as (
-			select * from subq order by %s asc
-		)
+			select * from subq order by %s asc limit row_limit
+		),
+        -- Check if has next page
+        has_next as (
+            select (select count(*) from subq) > row_limit as val
+        ),
+        -- Check if has previous page
+        has_previous as (
+            select 
+                case
+                    -- If a cursor is provided, that row appears on the previous page
+                    when coalesce(before_cursor, after_cursor) is null then true
+                    -- If no cursor is provided, no previous page
+                    else false
+                end val
+        ),
+        -- Page Info Cursors
+        start_cursor as (
+            select
+                %s::text as val
+            from 
+                subq_sorted
+            order by
+                %s asc
+            limit 1
+        ),
+        end_cursor as (
+            select
+                %s::text as val
+            from 
+                subq_sorted
+            order by
+                %s desc
+            limit 1
+        )
         -- Build result
 		select jsonb_build_object(
 			field_name,
 			( select
                 case
+                    when has_edges then jsonb_build_object(
+                        edges_field_name, jsonb_agg(
+                            case when has_cursor then jsonb_build_object(
+                                cursor_field_name,
+                                %s::text) else \'{}\'::jsonb end ||
+                            case when has_node then %s(
+                                    rec:=subq_sorted,
+                                    field:=node
+                                    ) else \'{}\'::jsonb end 
+                        )
+                    )
+                    else \'{}\'::jsonb
+                end ||
+                case
                     when has_total is not null then jsonb_build_object(total_field_name, (select total_count from total))
                     else \'{}\'::jsonb
                 end ||
-                jsonb_build_object(
-				    edges_field_name, jsonb_agg(
-                        case when has_cursor then jsonb_build_object(
-                            cursor_field_name,
-                            %s::text) else \'{}\'::jsonb end ||
-                        case when has_node then %s(
-                                rec:=subq_sorted,
-                                field:=node
-                                ) else \'{}\'::jsonb end 
-                    )
-                )
+                case
+                    when has_page_info then jsonb_build_object(
+                        page_info_field_name, ( 
+                            case
+                                when has_next_page then jsonb_build_object(
+                                    next_page_field_name, (select val from has_next)
+                                ) 
+                                else \'{}\'::jsonb
+                            end ||
+                            case
+                                when has_prev_page then jsonb_build_object(
+                                    previous_page_field_name, (select val from has_previous)
+                                )
+                            else \'{}\'::jsonb
+                            end ||
+                            case
+                                when has_start_cursor then jsonb_build_object(
+                                    start_cursor_field_name, (select val from start_cursor)
+                                ) else \'{}\'::jsonb
+                            end ||
+                            case
+                                when has_end_cursor then jsonb_build_object(
+                                    end_cursor_field_name, (select val from end_cursor)
+                                )  else \'{}\'::jsonb
+                            end 
+                        )
+                    ) 
+                    else \'{}\'::jsonb
+                end
+
 			)
 		)
 		from
@@ -1518,27 +1533,225 @@ begin
 	);
 end;
 $$;';
-			func_def := format(template,
-                gql.to_resolver_name(gql.relationship_to_gql_field_name(rec.constraint_name)),
-                rec.table_schema, rec.local_table,
-                cursor_type_name, cursor_type_name, cursor_type_name, cursor_type_name, 
-                rec.table_schema, rec.foreign_table,
-                join_clause, condition_clause,
-                rec.table_schema, rec.foreign_table, join_clause, pagination_clause, condition_clause,
-                order_clause, order_clause, order_clause,
-                cursor_selector, gql.to_resolver_name(gql.to_base_name(rec.foreign_table))		
-            );
 
-			raise notice 'Function %', func_def;
+
+		for tab_rec in (select * from gql.table_info ti where ti.table_schema=_table_schema) loop
+
+
+            -- Condition Clause
+            condition_clause := '';
+            for col_rec in (
+                select *
+                from gql.column_info ci
+                where ci.table_schema=tab_rec.table_schema
+                    and ci.table_name=tab_rec.table_name
+                ) loop
+
+                condition_clause := condition_clause || format(
+                    e'and coalesce(%s = (filter_condition ->> \'%s\')::%s, true)\n',
+                    col_rec.column_name, gql.to_field_name(col_rec.column_name), col_rec.sql_data_type
+                );
+            end loop;
+            
+            
+            -- Ordering Clause
+            order_clause := (select '(' || string_agg(x, ',') || ')' from unnest(tab_rec.pkey_cols) abc(x));
+            
+            -- Pagination Clause
+            cursor_type_name := gql.to_cursor_type_name(tab_rec.table_name);
+            cursor_extractor := gql.text_to_cursor_clause(
+                tab_rec.table_schema,
+                tab_rec.table_name,
+                'after_cursor'
+            );
+            
+            pagination_clause := format(e'and coalesce(%s > %s, true)\n', order_clause, cursor_extractor);
+            cursor_extractor := gql.text_to_cursor_clause(
+                tab_rec.table_schema,
+                tab_rec.table_name,
+                'before_cursor'
+            );
+            pagination_clause := pagination_clause || format(e'\t\t\t\tand coalesce(%s > %s, true)\n', order_clause, cursor_extractor);
+            
+            -- Cursor Selector
+            cursor_selector := gql.to_cursor_clause(tab_rec.table_schema, tab_rec.table_name, 'subq_sorted');
+            
+            -- Function Signature
+            resolver_function_args := 'field jsonb';
+
+            -- Entrypoint Connection
+			func_def := format(template,
+                gql.to_resolver_name(gql.to_connection_name(tab_rec.table_name)),
+                resolver_function_args,
+                cursor_type_name, cursor_type_name, cursor_type_name, cursor_type_name, 
+                tab_rec.table_schema, tab_rec.table_name,
+                'true', condition_clause,
+                tab_rec.table_schema, tab_rec.table_name, 'true', pagination_clause, condition_clause,
+                order_clause, order_clause, order_clause,
+                cursor_selector, order_clause,
+                cursor_selector, order_clause,
+                cursor_selector, gql.to_resolver_name(gql.to_base_name(tab_rec.table_name))		
+            );
 			execute func_def;
 
+            -- For each relationship, make a connection resolver
+            for rec in select *
+                    from gql.relationship_info ri
+                    where ri.table_schema = tab_rec.table_schema
+                            and ri.foreign_table = tab_rec.table_name
+				            and ri.foreign_cardinality = 'MANY' loop
+			
+                -- Build Join Clause
+                join_clause := '';
+                for ix in select generate_series(1, array_length(rec.local_columns, 1)) loop
+                    join_clause := join_clause || format('rec.%s = %s.%s and ',
+                                                         rec.local_columns[ix],
+                                                         rec.foreign_table,
+                                                         rec.foreign_columns[ix]);
+                end loop;
+                join_clause := substring(join_clause, 1, character_length(join_clause)-4);
+                
+                
+                -- Function Signature
+                resolver_function_args := format(
+                    'rec %s.%s, field jsonb',
+                    rec.table_schema,
+                    rec.local_table
+                );
+                
+                
+                func_def := format(template,
+                    gql.to_resolver_name(gql.relationship_to_gql_field_name(rec.constraint_name)),
+                    resolver_function_args,
+                    cursor_type_name, cursor_type_name, cursor_type_name, cursor_type_name, 
+                    rec.table_schema, rec.foreign_table,
+                    join_clause, condition_clause,
+                    rec.table_schema, rec.foreign_table, join_clause, pagination_clause, condition_clause,
+                    order_clause, order_clause, order_clause,
+                    cursor_selector, order_clause,
+                    cursor_selector, order_clause,
+                    cursor_selector, gql.to_resolver_name(gql.to_base_name(rec.foreign_table))		
+                );
+
+                --raise notice 'Function %', func_def;
+                execute func_def;
+
+		    end loop;
 		end loop;
 	end;
 $BODY$;
 
 
 
+CREATE OR REPLACE FUNCTION gql.build_resolve_relationship_to_one(_table_schema text) RETURNS void
+    LANGUAGE 'plpgsql'
+AS $BODY$
+	declare
+		rec record;
+		join_clause text;
+		func_def text;
+		ix int;
+        template text;
+		
+    begin
 
+            template := e'
+create or replace function %s(rec %s.%s, field jsonb) returns jsonb
+	language plpgsql stable as
+$$
+begin
+	-- Compute total
+    return ( 
+		select
+            %s(
+                rec:=%s,
+                field:=field
+            )
+		from
+			%s.%s
+        where
+            -- Join clause
+            %s
+        -- Only returns 1 row due to join clause
+        limit 1
+    );
+end;
+$$;';
+
+
+            -- For each relationship, make a connection resolver
+        for rec in select *
+                from gql.relationship_info ri
+                where ri.table_schema = _table_schema
+                        and ri.foreign_cardinality = 'ONE' loop
+        
+                -- Build Join Clause
+                join_clause := '';
+                for ix in select generate_series(1, array_length(rec.local_columns, 1)) loop
+                    join_clause := join_clause || format('rec.%s = %s.%s and ',
+                                                         rec.local_columns[ix],
+                                                         rec.foreign_table,
+                                                         rec.foreign_columns[ix]);
+                end loop;
+                join_clause := substring(join_clause, 1, character_length(join_clause)-4);
+ 
+            -- Entrypoint Connection
+			func_def := format(template,
+                gql.to_resolver_name(gql.relationship_to_gql_field_name(rec.constraint_name)),
+                rec.table_schema, rec.local_table,
+                gql.to_resolver_name(gql.to_base_name(rec.foreign_table)),
+                rec.foreign_table,
+                rec.table_schema, rec.foreign_table,
+                join_clause
+            );
+			execute func_def;
+        end loop;
+	end;
+$BODY$;
+
+
+create or replace function gql.build_resolve_stubs(_table_schema text) returns void
+	language plpgsql as
+$body$
+	declare
+		rec record;
+		func_def text;
+		resolver_name text;
+	begin
+		for rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
+
+            -- Row Resolver
+            resolver_name := gql.to_resolver_name(gql.to_base_name(rec.table_name));
+			func_def := format(e'
+create or replace function %s(rec %s.%s, field jsonb) returns jsonb
+language plpgsql stable as
+$$ begin raise notice \'Resolved by stub. You must build resolvers\'; return null::jsonb; end;
+$$;', resolver_name, rec.table_schema, rec.table_name);
+			execute func_def;
+
+            -- Connection Resolver
+            resolver_name := gql.to_resolver_name(gql.to_connection_name(rec.table_name));
+			func_def := format(e'
+create or replace function %s(field jsonb) returns jsonb
+language plpgsql stable as
+$$ begin raise notice \'Resolved by stub. You must build resolvers\'; return null::jsonb; end;
+$$;', resolver_name, rec.table_schema, rec.table_name);
+			execute func_def;
+            
+		end loop;
+
+        -- Relationship Resolver
+		for rec in select * from gql.relationship_info ci where ci.table_schema=table_schema loop
+            resolver_name := gql.to_resolver_name(gql.relationship_to_gql_field_name(rec.constraint_name));
+			func_def := format(e'
+create or replace function %s(rec %s.%s, field jsonb) returns jsonb
+language plpgsql stable as
+$$ begin raise notice \'Resolved by stub. You must build resolvers\'; return null::jsonb; end;
+$$;', resolver_name, rec.table_schema, rec.local_table);
+			execute func_def;
+		end loop;
+	end;
+$body$;
 
 
 create or replace function gql.build_resolvers(_table_schema text) returns void
@@ -1548,7 +1761,8 @@ $$
 		perform gql.build_resolve_stubs(_table_schema);
 		perform gql.build_cursor_types(_table_schema);
 		perform gql.build_resolve_cursor(_table_schema);
-		perform gql.build_resolve_connection_relationships(_table_schema);
+		perform gql.build_resolve_connections(_table_schema);
+        perform gql.build_resolve_relationship_to_one(_table_schema);
 		perform gql.build_resolve_rows(_table_schema);
 		perform gql.build_resolve_entrypoint_one(_table_schema);
 		perform gql.build_resolve_entrypoint_connection(_table_schema);
@@ -1606,8 +1820,7 @@ $$
     begin
         -- Raising these notices takes about 0.1 milliseconds
 		--raise notice 'Tokens %', tokens::text;
-		--raise notice 'AST %', jsonb_pretty(ast);
-		--raise notice 'SQL %', sql_query;
+	    -- raise notice 'AST %', jsonb_pretty(ast);
         return gql.resolve(ast);
 	end;
 $$ language plpgsql stable;

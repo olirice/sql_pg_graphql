@@ -9,8 +9,6 @@
 */
 
 
-
-
 create or replace function gql.to_cursor_type_name(_table_name text) returns text
 	language sql immutable as
 $$ select 'gql.' || _table_name || '_cursor';
@@ -95,9 +93,6 @@ $$
 -- Due to inability to work with indexes
 select format(e'\ngql.resolve_cursor(%s::%s.%s)::text', rec_name, _table_schema, _table_name);
 $$;
-
-
-
 
 
 

@@ -6,8 +6,7 @@ $$
     begin
         -- Raising these notices takes about 0.1 milliseconds
 		--raise notice 'Tokens %', tokens::text;
-		--raise notice 'AST %', jsonb_pretty(ast);
-		--raise notice 'SQL %', sql_query;
+	    -- raise notice 'AST %', jsonb_pretty(ast);
         return gql.resolve(ast);
 	end;
 $$ language plpgsql stable;

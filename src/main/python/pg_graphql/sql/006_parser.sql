@@ -47,7 +47,7 @@ as $BODY$
         last_iter_fields jsonb := null;
         fields jsonb := '{}';
         cur_field gql.partial_parse;
-        arg_depth int := 1;
+        field_depth int := 0;
         condition jsonb := '{}';
         ix int;
     begin
@@ -115,11 +115,20 @@ as $BODY$
 
     -- Read Fields
     if tokens[1].kind = 'BRACE_L' then
-        tokens := tokens[2:];
-        loop
-            exit when (tokens[1].kind = 'BRACE_R' or fields = last_iter_fields);
+        for ix in (select * from generate_series(1, array_length(tokens,1))) loop
+
+            if (tokens[1].kind = 'BRACE_L') then
+                tokens := tokens[2:];
+                field_depth := field_depth + 1;
+            end if;
+            if (tokens[1].kind = 'BRACE_R') then
+                tokens := tokens[2:];
+                field_depth := field_depth - 1;
+            end if;
+
+            exit when field_depth = 0;
+
             cur_field := gql.parse_field(tokens);
-            last_iter_fields := fields;
             fields := fields || cur_field.contents;
             tokens := cur_field.remaining;
         end loop;

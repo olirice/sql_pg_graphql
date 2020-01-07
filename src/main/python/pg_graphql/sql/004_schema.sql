@@ -256,6 +256,7 @@ begin
 type %s {
     edges: [%s!]!
     total_count: Int!
+    pageInfo: PageInfo!
 }    
 $typedef$, connection_type_name, edge_type_name);
 end;
@@ -319,9 +320,16 @@ $$;
 
 create or replace function gql.to_schema(_table_schema text) returns text as $$
     
-	select
-	    e'scalar Cursor\n\n' ||
+	select '
+scalar Cursor
 
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: Cursor
+  endCursor: Cursor
+}
+' ||
         string_agg(zzz.def, E'\n')
 	from
 		(
