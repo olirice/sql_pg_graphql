@@ -773,11 +773,8 @@ create type gql.partial_parse as (
 );
 
 
-
-
-
 create or replace function gql.parse_field(tokens gql.token[]) returns gql.partial_parse
-    language plpgsql immutable strict parallel safe
+    language plpgsql immutable parallel safe
 as $BODY$
     declare
         _alias text;
@@ -791,6 +788,9 @@ as $BODY$
         field_depth int := 0;
         condition jsonb := '{}';
         ix int;
+
+        include jsonb := to_jsonb(true);
+        skip jsonb := to_jsonb(false);
     begin
     -- Read Alias
     if (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
@@ -802,9 +802,43 @@ as $BODY$
 
     -- Read Name
     _name := tokens[1].content;
+
+    
+
+    
+
+    -- Handle Fragments
+    -- https://graphql.org/learn/queries/#fragments
+    if _name = '...' then
+        _name := _name || tokens[2].content;
+        -- Advance past the spread marker
+        tokens := tokens[2:];
+    end if;
+
+    -- Advance past name
     tokens := tokens[2:];
 
-    -- Read Args
+
+    -- Handle Directives
+    -- https://graphql.org/learn/queries/#directives
+    if tokens[1].kind = 'AT' then
+        -- Looks like @<BLANK>(if: <BLANK>)
+        if (tokens[3].kind, tokens[4].content, tokens[5].kind, tokens[7].kind) = ('PAREN_L', 'if', 'COLON', 'PAREN_R') 
+            and tokens[2].content in ('include', 'skip') then
+
+            include := case tokens[2].content when 'include' then to_jsonb(tokens[6].content) else include end;
+            skip := case tokens[2].content when 'skip' then to_jsonb(tokens[6].content) else skip end;
+
+        else
+            raise exception 'gql.parse_field: invalid state while parsing directive %', tokens;
+        end if;
+        tokens := tokens[8:];
+
+    end if;
+
+
+
+        -- Read Args
     if tokens[1].kind = 'PAREN_L' then
         -- Skip over the PAREN_L
         tokens := tokens[2:];
@@ -825,21 +859,36 @@ as $BODY$
                         tokens := tokens[2:];
                         exit;
                     end if;
-                    if (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
+                    -- Parse a variable argument
+                    if (tokens[1].kind, tokens[2].kind, tokens[3].kind) = ('NAME', 'COLON', 'DOLLAR') then
 				        cur := jsonb_build_object(
+                            tokens[1].content,
+                            '$' || tokens[4].content
+                        );
+                        tokens := tokens[5:];
+                    -- Parse a standard argument
+                    elsif (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
+                        cur := jsonb_build_object(
                             tokens[1].content,
                             tokens[3].content
                         );
+                        tokens := tokens[4:];
                     end if;
                     condition := condition || cur;
-                    tokens := tokens[4:];
                 end loop;
 
                 cur := jsonb_build_object('condition', cur);
 
+            -- Parse a variable argument
+            elsif (tokens[1].kind, tokens[2].kind, tokens[3].kind) = ('NAME', 'COLON', 'DOLLAR') then
+                cur := jsonb_build_object(
+                    tokens[1].content,
+                    '$' || tokens[4].content
+                );
+                tokens := tokens[5:];
             -- Parse a standard argument
             elsif (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
-				cur := jsonb_build_object(
+                cur := jsonb_build_object(
                     tokens[1].content,
                     tokens[3].content
                 );
@@ -877,6 +926,8 @@ as $BODY$
         fields := '{}'::jsonb;
     end if;
 
+
+
 	return (
         select
             (
@@ -885,7 +936,9 @@ as $BODY$
                     'alias', _alias,
                     'name', _name,
                     'args', args,
-                    'fields', fields
+                    'fields', fields,
+                    'include', include,
+                    'skip', skip
                 )),
 	            tokens
 	        )::gql.partial_parse
@@ -893,23 +946,261 @@ as $BODY$
     end;
 $BODY$;
 
-create or replace function gql.parse_operation(tokens gql.token[]) returns jsonb
+
+create or replace function gql.parse_fragments(tokens gql.token[]) returns jsonb
     language plpgsql immutable strict parallel safe
 as $BODY$
-    begin
-        -- Standard syntax: "query { ..."
-        if (tokens[1].kind, tokens[2].kind) = ('NAME', 'BRACE_L') and tokens[1].content = 'query'
-            then tokens := tokens[3:];
-        end if;
+/*
+{   
+    fragment_1: {
+        "field1": # Field def,
+    }
+}
+*/
+declare
+    ix int;
+    fragments jsonb := '{}';
 
-        -- Simplified syntax for single queries: "{ ..."
-        if tokens[1].kind = 'BRACE_L'
-            then tokens := tokens[2:];
-        end if;
+begin
+    for ix in (select * from generate_series(1, array_length(tokens,1))) loop
+        if (
+            tokens[1].kind, tokens[1].content, tokens[2].kind,
+            tokens[3].kind, tokens[3].content, tokens[4].kind,
+            tokens[5].kind
+           ) = (
+            'NAME', 'fragment', 'NAME',
+            'NAME', 'on', 'NAME', 'BRACE_L'
+           ) then
 
-        return (select gql.parse_field(tokens)).contents;
-    end;
+            -- Make the fragemnt look like a field so we can parse it
+            fragments := fragments || (
+                gql.parse_field(
+                    -- Make the fragemnt look like a field so we can parse it
+                    ('NAME', '...' || tokens[2].content)::gql.token || tokens[5:]
+                )
+            ).contents; 
+
+        end if;
+        tokens := tokens[2:array_length(tokens,1)];
+        exit when tokens is null;
+    end loop;
+    return fragments; 
+end;
 $BODY$;
+
+
+
+
+
+
+create or replace function gql.ast_recursive_merge(a jsonb, b jsonb)
+returns jsonb language sql as $$
+    select 
+        jsonb_object_agg(
+            coalesce(ka, kb), 
+            case 
+                when va is null then vb 
+                when vb is null then va 
+                when va = vb then va
+                --when jsonb_typeof(va) <> 'object' then va || vb
+                when (jsonb_typeof(va) = 'object' and jsonb_typeof(vb) = 'object') then gql.ast_recursive_merge(va, vb)
+                else coalesce(va, vb)
+            end
+        )
+    from jsonb_each(a) e1(ka, va)
+    full join jsonb_each(b) e2(kb, vb) on ka = kb;
+$$;
+
+
+CREATE or replace FUNCTION gql.ast_merge_at_key(obj jsonb, search text, substitute jsonb) RETURNS jsonb
+STRICT LANGUAGE SQL AS $$
+/*
+Anywhere 'search' is found as a key, 'substitute' is unpacked in its place.
+Intended for unpacking query fragments on an AST
+ */
+  SELECT
+    CASE jsonb_typeof(obj)
+        
+        WHEN 'object' THEN
+          coalesce(
+            gql.ast_recursive_merge(
+                (
+                    SELECT
+                        jsonb_object_agg(
+                            key,
+                            gql.ast_merge_at_key(
+                                value,
+                                search,
+                                substitute
+                            )
+                        )
+                    FROM
+                        jsonb_each(obj)
+                    WHERE
+                        key <> search
+                ),
+                CASE
+                    -- Extract fields from the fragment into the current level
+                    WHEN obj ? search THEN substitute
+                    ELSE '{}'
+                END
+            ),
+            '{}'::jsonb
+        )
+        -- AST does not contain array types 
+        -- WHEN 'array' THEN
+
+        -- Scalar
+        ELSE
+          obj
+    END;
+$$;
+
+CREATE or replace FUNCTION gql.ast_expand_fragments(ast jsonb, fragments jsonb) RETURNS jsonb
+language plpgsql immutable parallel safe as
+$BODY$
+declare
+    fragment record;
+    ast_prior jsonb;
+    ix int;
+begin
+/*
+    AST Passes to populate query fragments
+    --------------------------------------
+    Fragments may be nested but nested fragments are
+    forbidden from forming cylces in the specification
+    */
+    
+    -- Set maximum depth of nested query fragments
+    for ix in select * from generate_series(1, 10) loop
+        ast_prior = ast;
+        -- Expand fragments in the AST
+        for fragment in select key, value from jsonb_each(fragments) loop
+            ast := gql.ast_merge_at_key(ast, fragment.key, fragment.value -> 'fields');
+        end loop;
+        -- If nothing happend, we're done
+        if ast = ast_prior then
+            exit;
+        end if;
+    end loop;
+    return ast;
+end;
+$BODY$;
+
+
+
+
+CREATE or replace FUNCTION gql.ast_replace_value(ast jsonb, search jsonb, substitute jsonb) RETURNS jsonb
+STRICT LANGUAGE SQL AS $$
+/*
+Anywhere 'search' is found as a key, 'substitute' is unpacked in its place.
+Intended for unpacking query fragments on an AST
+ */
+  SELECT
+    CASE jsonb_typeof(ast)
+        WHEN 'object' THEN
+          coalesce((
+            SELECT
+                jsonb_object_agg(
+                    key,
+                    gql.ast_replace_value(value, search, substitute)
+                )
+            FROM
+                jsonb_each(ast)
+            ),
+            '{}'::jsonb
+        )
+        -- AST does not contain array types 
+        -- WHEN 'array' THEN
+        -- TODO(OR): A literal string argument passed as a 
+        when 'string' then case when ast = search then substitute else ast end
+        else ast
+    end;
+
+$$;
+
+
+
+
+CREATE or replace FUNCTION gql.ast_substitute_variables(ast jsonb, variables jsonb) RETURNS jsonb
+language plpgsql immutable parallel safe as
+$BODY$
+declare
+    variable record;
+begin
+    -- AST Pass to populate variables
+    for variable in select key, value from jsonb_each(variables) loop
+        ast := gql.ast_replace_value(
+            ast := ast,
+            search := to_jsonb(('$' || variable.key)::text),
+            substitute := variable.value
+        );
+    end loop;
+
+    return ast;
+end;
+$BODY$;
+
+
+
+
+
+
+
+create or replace function gql.to_bool(jsonb) returns bool
+language sql immutable as 
+$$
+    select
+        case
+            when $1 = to_jsonb('true'::text) then true
+            when $1 = to_jsonb('false'::text) then false
+            when $1 = to_jsonb(true::bool) then true
+            when $1 = to_jsonb(false::bool) then false
+        end;
+$$;
+
+
+
+create or replace function gql.ast_is_skip(ast jsonb) returns bool
+language sql immutable as
+$$
+    select 
+        case
+            when (jsonb_typeof(ast) = 'object'
+                    and ast ? 'fields'
+                    and ast ? 'args'
+                    and ast ? 'include'
+                    and ast ? 'skip'
+                ) then gql.to_bool(ast -> 'include') and not gql.to_bool(ast -> 'skip')
+            else true
+        end
+$$;
+
+
+CREATE or replace FUNCTION gql.ast_apply_directives(ast jsonb) RETURNS jsonb
+STRICT LANGUAGE SQL AS $$
+/*
+Skip fields where skip = true or include = false
+ */
+  SELECT
+    CASE 
+        WHEN jsonb_typeof(ast) = 'object' THEN
+          coalesce((
+            SELECT
+                jsonb_object_agg(
+                    key,
+                    gql.ast_apply_directives(value)
+                )
+            FROM
+                jsonb_each(ast)
+            WHERE
+                gql.ast_is_skip(value)
+        ), 
+        '{}'::jsonb)
+        else ast
+    end;
+
+$$;
 
 
 /*
@@ -1005,7 +1296,7 @@ create or replace function gql.record_to_cursor_select_clause(_table_schema text
 $$ 
 -- For selecting a cursor from a record to return to a user. Not suitable for filtering
 -- Due to inability to work with indexes
-select format(e'\ngql.resolve_cursor(%s::%s.%s)::text', rec_name, _table_schema, _table_name);
+select format(e'gql.resolve_cursor(%s::%s.%s)::text', rec_name, _table_schema, _table_name);
 $$;
 
 
@@ -1090,71 +1381,71 @@ $$ select 'gql."resolve_' || field_name || '"'
 $$ language sql immutable returns null on null input;
 
 
+
+create or replace function gql.to_field_selector_clause(gql.column_info) returns text
+	language sql stable as
+$$
+	select format(
+		e'case when field #> \'{fields,%s}\' is not null then jsonb_build_object(coalesce(field #>> \'{fields,%s,alias}\', field #>> \'{fields,%s,name}\'), rec.%s) else \'{}\' end',
+		gql.to_field_name($1.column_name),
+		gql.to_field_name($1.column_name),
+		gql.to_field_name($1.column_name),
+		$1.column_name
+	);
+$$;
+
+
+create or replace function gql.to_field_selector_clause(gql.relationship_info) returns text
+	language plpgsql stable as
+$$
+declare
+	field_name text := gql.relationship_to_gql_field_name($1.constraint_name);
+	resolver_name text := gql.to_resolver_name(field_name);
+begin
+	return format(
+		e'case when field #> \'{fields,%s}\' is not null then %s(rec := rec, field := field #> \'{fields,%s}\') else \'{}\' end',
+		field_name,
+		resolver_name,
+		field_name
+	);
+end;
+$$;
+
+
 create or replace function gql.build_resolve_rows(_table_schema text) returns void
 	language plpgsql as
 $body$
 	declare
 		tab_rec record;
-		col_rec record;
-		rel_rec record;
-		clause text;
 		func_def text;
-		relationship_field_name text;
-        resolver_name text;
         cursor_selector text;
-        column_selector text;
-        relationship_selector text;
+        selector text;
 	begin
 		for tab_rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
 
 			cursor_selector := gql.record_to_cursor_select_clause(tab_rec.table_schema, tab_rec.table_name, 'rec');
 
-            -- column resolvers
-            column_selector := '';
-			for col_rec in (
-				select *
-				from gql.column_info ci
-				where
-					ci.table_schema=tab_rec.table_schema
-					and ci.table_name = tab_rec.table_name)
-				loop
-					clause := format(e'
-            || case when field #> \'{fields,%s}\' is not null
-                 then jsonb_build_object(
-                    coalesce(
-                        field #>> \'{fields,%s,alias}\',
-                        field #>> \'{fields,%s,name}\'
-                    ),
-                    rec.%s
-                 )
-                 else \'{}\'::jsonb
-                     end',
-					col_rec.column_name, col_rec.column_name, col_rec.column_name, col_rec.column_name
-					);
-					column_selector := column_selector || clause;
-				end loop;
-			
-			-- Relationship Resolvers
-            relationship_selector := '';
-			for rel_rec in (
-				select *
-				from gql.relationship_info ci
-				where
-					ci.table_schema=tab_rec.table_schema
-					and ci.local_table = tab_rec.table_name)
-				loop
-					relationship_field_name := gql.relationship_to_gql_field_name(rel_rec.constraint_name);
-                    resolver_name := gql.to_resolver_name(relationship_field_name);
-					clause := format(e'
-            || case when field #> \'{fields,%s}\' is not null
-									 then %s(rec, field #> \'{fields,%s}\' )
-									 else \'{}\'::jsonb
-									 end',
-					relationship_field_name, resolver_name, relationship_field_name);
-					relationship_selector := relationship_selector || clause;
-				end loop;
-				
+            select string_agg(s_clause, e'\n || ')
+            from
+            (
+                -- Columns
+                select gql.to_field_selector_clause(ci) s_clause
+                from gql.column_info ci
+                where
+                    ci.table_schema=tab_rec.table_schema
+                    and ci.table_name = tab_rec.table_name
+                
+                union all
+                -- Relationships
+                select gql.to_field_selector_clause(ri) s_clause
+                from gql.relationship_info ri
+                where
+                    ri.table_schema=tab_rec.table_schema
+                    and ri.local_table = tab_rec.table_name
+            ) abc(s_clause)
+            into selector;
 
+            
 		
 			func_def := format(e'
 create or replace function %s(rec %s.%s, field jsonb)
@@ -1177,15 +1468,14 @@ begin
                                 %s
                              )
                              else \'{}\'::jsonb
-                             end
-%s
+                             end ||
 %s
                    )
             );
 end;
 $$;',
                 gql.to_resolver_name(gql.to_base_name(tab_rec.table_name)), tab_rec.table_schema, tab_rec.table_name,
-                cursor_selector, column_selector, relationship_selector
+                cursor_selector, selector
             );
             raise notice 'Function %', func_def;
 			execute func_def;
@@ -1812,15 +2102,52 @@ $body$;
 
 
 
-create or replace function gql.execute(operation text) returns jsonb as
+create or replace function gql.parse_operation(tokens gql.token[], variables jsonb default '{}'::jsonb) returns jsonb
+    language plpgsql immutable strict parallel safe
+as $BODY$
+declare
+    ast jsonb;
+    fragments jsonb := gql.parse_fragments(tokens);
+begin
+    -- Standard syntax: "query { ..."
+    if (tokens[1].kind, tokens[2].kind) = ('NAME', 'BRACE_L') and tokens[1].content = 'query'
+        then tokens := tokens[3:];
+    end if;
+
+    -- Simplified syntax for single queries: "{ ..."
+    if tokens[1].kind = 'BRACE_L'
+        then tokens := tokens[2:];
+    end if;
+
+    -- Parse request
+    ast := (gql.parse_field(tokens)).contents;
+
+    -- Expand query fragments
+    ast := gql.ast_expand_fragments(ast, fragments); 
+
+    -- Insert variable values
+    ast := gql.ast_substitute_variables(ast, variables); 
+
+    -- Apply skip and include directives
+    ast := gql.ast_apply_directives(ast); 
+    return ast;
+end;
+$BODY$;
+
+
+
+
+
+
+create or replace function gql.execute(operation text, variables text default '{}') returns jsonb as
 $$
     declare
+        vars jsonb := variables::jsonb;
         tokens gql.token[] := gql.tokenize_operation(operation);
-        ast jsonb := gql.parse_operation(tokens);
+        ast jsonb := gql.parse_operation(tokens, vars);
     begin
         -- Raising these notices takes about 0.1 milliseconds
 		--raise notice 'Tokens %', tokens::text;
-	    -- raise notice 'AST %', jsonb_pretty(ast);
         return gql.resolve(ast);
 	end;
 $$ language plpgsql stable;

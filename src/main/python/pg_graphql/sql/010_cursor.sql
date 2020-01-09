@@ -91,7 +91,7 @@ create or replace function gql.record_to_cursor_select_clause(_table_schema text
 $$ 
 -- For selecting a cursor from a record to return to a user. Not suitable for filtering
 -- Due to inability to work with indexes
-select format(e'\ngql.resolve_cursor(%s::%s.%s)::text', rec_name, _table_schema, _table_name);
+select format(e'gql.resolve_cursor(%s::%s.%s)::text', rec_name, _table_schema, _table_name);
 $$;
 
 

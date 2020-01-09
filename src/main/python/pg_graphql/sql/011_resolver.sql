@@ -16,71 +16,71 @@ $$ select 'gql."resolve_' || field_name || '"'
 $$ language sql immutable returns null on null input;
 
 
+
+create or replace function gql.to_field_selector_clause(gql.column_info) returns text
+	language sql stable as
+$$
+	select format(
+		e'case when field #> \'{fields,%s}\' is not null then jsonb_build_object(coalesce(field #>> \'{fields,%s,alias}\', field #>> \'{fields,%s,name}\'), rec.%s) else \'{}\' end',
+		gql.to_field_name($1.column_name),
+		gql.to_field_name($1.column_name),
+		gql.to_field_name($1.column_name),
+		$1.column_name
+	);
+$$;
+
+
+create or replace function gql.to_field_selector_clause(gql.relationship_info) returns text
+	language plpgsql stable as
+$$
+declare
+	field_name text := gql.relationship_to_gql_field_name($1.constraint_name);
+	resolver_name text := gql.to_resolver_name(field_name);
+begin
+	return format(
+		e'case when field #> \'{fields,%s}\' is not null then %s(rec := rec, field := field #> \'{fields,%s}\') else \'{}\' end',
+		field_name,
+		resolver_name,
+		field_name
+	);
+end;
+$$;
+
+
 create or replace function gql.build_resolve_rows(_table_schema text) returns void
 	language plpgsql as
 $body$
 	declare
 		tab_rec record;
-		col_rec record;
-		rel_rec record;
-		clause text;
 		func_def text;
-		relationship_field_name text;
-        resolver_name text;
         cursor_selector text;
-        column_selector text;
-        relationship_selector text;
+        selector text;
 	begin
 		for tab_rec in select * from gql.table_info ci where ci.table_schema=table_schema loop
 
 			cursor_selector := gql.record_to_cursor_select_clause(tab_rec.table_schema, tab_rec.table_name, 'rec');
 
-            -- column resolvers
-            column_selector := '';
-			for col_rec in (
-				select *
-				from gql.column_info ci
-				where
-					ci.table_schema=tab_rec.table_schema
-					and ci.table_name = tab_rec.table_name)
-				loop
-					clause := format(e'
-            || case when field #> \'{fields,%s}\' is not null
-                 then jsonb_build_object(
-                    coalesce(
-                        field #>> \'{fields,%s,alias}\',
-                        field #>> \'{fields,%s,name}\'
-                    ),
-                    rec.%s
-                 )
-                 else \'{}\'::jsonb
-                     end',
-					col_rec.column_name, col_rec.column_name, col_rec.column_name, col_rec.column_name
-					);
-					column_selector := column_selector || clause;
-				end loop;
-			
-			-- Relationship Resolvers
-            relationship_selector := '';
-			for rel_rec in (
-				select *
-				from gql.relationship_info ci
-				where
-					ci.table_schema=tab_rec.table_schema
-					and ci.local_table = tab_rec.table_name)
-				loop
-					relationship_field_name := gql.relationship_to_gql_field_name(rel_rec.constraint_name);
-                    resolver_name := gql.to_resolver_name(relationship_field_name);
-					clause := format(e'
-            || case when field #> \'{fields,%s}\' is not null
-									 then %s(rec, field #> \'{fields,%s}\' )
-									 else \'{}\'::jsonb
-									 end',
-					relationship_field_name, resolver_name, relationship_field_name);
-					relationship_selector := relationship_selector || clause;
-				end loop;
-				
+            select string_agg(s_clause, e'\n || ')
+            from
+            (
+                -- Columns
+                select gql.to_field_selector_clause(ci) s_clause
+                from gql.column_info ci
+                where
+                    ci.table_schema=tab_rec.table_schema
+                    and ci.table_name = tab_rec.table_name
+                
+                union all
+                -- Relationships
+                select gql.to_field_selector_clause(ri) s_clause
+                from gql.relationship_info ri
+                where
+                    ri.table_schema=tab_rec.table_schema
+                    and ri.local_table = tab_rec.table_name
+            ) abc(s_clause)
+            into selector;
 
+            
 		
 			func_def := format(e'
 create or replace function %s(rec %s.%s, field jsonb)
@@ -103,15 +103,14 @@ begin
                                 %s
                              )
                              else \'{}\'::jsonb
-                             end
-%s
+                             end ||
 %s
                    )
             );
 end;
 $$;',
                 gql.to_resolver_name(gql.to_base_name(tab_rec.table_name)), tab_rec.table_schema, tab_rec.table_name,
-                cursor_selector, column_selector, relationship_selector
+                cursor_selector, selector
             );
             raise notice 'Function %', func_def;
 			execute func_def;

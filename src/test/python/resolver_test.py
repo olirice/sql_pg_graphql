@@ -1,4 +1,5 @@
 import pytest
+from pg_graphql.executor import execute_operation
 
 SQL_UP = """
 select gql.drop_resolvers();
@@ -47,8 +48,7 @@ drop table account cascade;
 """
 
 
-INTEGRATION_QUERY = """
-select gql.execute($$
+INTEGRATION_QUERY = execute_operation("""
     query {
         account(nodeId: "(1)") {
             name
@@ -63,8 +63,7 @@ select gql.execute($$
             created_at
         }
     }
-$$);
-"""
+""", {})
 
 
 @pytest.fixture
@@ -78,11 +77,7 @@ def build_tables(session):
 
 
 def test_operation(session, build_tables):
-    query = """
-        select gql.execute($$
-            query { account(nodeId: "(1)") { name my_id: id, created_at} }
-        $$);
-    """
+    query = execute_operation("""query { account(nodeId: "(1)") { name my_id: id, created_at} }""", {})
     (result,) = session.execute(query).fetchone()
     assert isinstance(result, dict)
     assert len(result) == 3
@@ -93,6 +88,7 @@ def test_operation(session, build_tables):
 
 def test_nested_operation(session, build_tables):
     (result,) = session.execute(INTEGRATION_QUERY).fetchone()
+    print(result)
     assert isinstance(result, dict)
     assert isinstance(result["post_collection_by_id_to_owner_id"], dict)
     assert isinstance(result["post_collection_by_id_to_owner_id"]["edges"], list)

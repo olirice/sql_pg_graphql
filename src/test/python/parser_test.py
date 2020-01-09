@@ -34,7 +34,7 @@ def build_sql_query(text_to_parse) -> TextClause:
         select
             jsonb_pretty(
                 gql.parse_operation(
-                    gql.tokenize_operation($ttp${text_to_parse}$ttp$)
+                    gql.tokenize_operation($ttp${text_to_parse}$ttp$::text)
                 )
             )
         """

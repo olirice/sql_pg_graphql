@@ -32,11 +32,8 @@ create type gql.partial_parse as (
 );
 
 
-
-
-
 create or replace function gql.parse_field(tokens gql.token[]) returns gql.partial_parse
-    language plpgsql immutable strict parallel safe
+    language plpgsql immutable parallel safe
 as $BODY$
     declare
         _alias text;
@@ -50,6 +47,9 @@ as $BODY$
         field_depth int := 0;
         condition jsonb := '{}';
         ix int;
+
+        include jsonb := to_jsonb(true);
+        skip jsonb := to_jsonb(false);
     begin
     -- Read Alias
     if (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
@@ -61,9 +61,43 @@ as $BODY$
 
     -- Read Name
     _name := tokens[1].content;
+
+    
+
+    
+
+    -- Handle Fragments
+    -- https://graphql.org/learn/queries/#fragments
+    if _name = '...' then
+        _name := _name || tokens[2].content;
+        -- Advance past the spread marker
+        tokens := tokens[2:];
+    end if;
+
+    -- Advance past name
     tokens := tokens[2:];
 
-    -- Read Args
+
+    -- Handle Directives
+    -- https://graphql.org/learn/queries/#directives
+    if tokens[1].kind = 'AT' then
+        -- Looks like @<BLANK>(if: <BLANK>)
+        if (tokens[3].kind, tokens[4].content, tokens[5].kind, tokens[7].kind) = ('PAREN_L', 'if', 'COLON', 'PAREN_R') 
+            and tokens[2].content in ('include', 'skip') then
+
+            include := case tokens[2].content when 'include' then to_jsonb(tokens[6].content) else include end;
+            skip := case tokens[2].content when 'skip' then to_jsonb(tokens[6].content) else skip end;
+
+        else
+            raise exception 'gql.parse_field: invalid state while parsing directive %', tokens;
+        end if;
+        tokens := tokens[8:];
+
+    end if;
+
+
+
+        -- Read Args
     if tokens[1].kind = 'PAREN_L' then
         -- Skip over the PAREN_L
         tokens := tokens[2:];
@@ -84,21 +118,36 @@ as $BODY$
                         tokens := tokens[2:];
                         exit;
                     end if;
-                    if (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
+                    -- Parse a variable argument
+                    if (tokens[1].kind, tokens[2].kind, tokens[3].kind) = ('NAME', 'COLON', 'DOLLAR') then
 				        cur := jsonb_build_object(
+                            tokens[1].content,
+                            '$' || tokens[4].content
+                        );
+                        tokens := tokens[5:];
+                    -- Parse a standard argument
+                    elsif (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
+                        cur := jsonb_build_object(
                             tokens[1].content,
                             tokens[3].content
                         );
+                        tokens := tokens[4:];
                     end if;
                     condition := condition || cur;
-                    tokens := tokens[4:];
                 end loop;
 
                 cur := jsonb_build_object('condition', cur);
 
+            -- Parse a variable argument
+            elsif (tokens[1].kind, tokens[2].kind, tokens[3].kind) = ('NAME', 'COLON', 'DOLLAR') then
+                cur := jsonb_build_object(
+                    tokens[1].content,
+                    '$' || tokens[4].content
+                );
+                tokens := tokens[5:];
             -- Parse a standard argument
             elsif (tokens[1].kind, tokens[2].kind) = ('NAME', 'COLON') then
-				cur := jsonb_build_object(
+                cur := jsonb_build_object(
                     tokens[1].content,
                     tokens[3].content
                 );
@@ -136,6 +185,8 @@ as $BODY$
         fields := '{}'::jsonb;
     end if;
 
+
+
 	return (
         select
             (
@@ -144,7 +195,9 @@ as $BODY$
                     'alias', _alias,
                     'name', _name,
                     'args', args,
-                    'fields', fields
+                    'fields', fields,
+                    'include', include,
+                    'skip', skip
                 )),
 	            tokens
 	        )::gql.partial_parse
@@ -152,20 +205,47 @@ as $BODY$
     end;
 $BODY$;
 
-create or replace function gql.parse_operation(tokens gql.token[]) returns jsonb
+
+create or replace function gql.parse_fragments(tokens gql.token[]) returns jsonb
     language plpgsql immutable strict parallel safe
 as $BODY$
-    begin
-        -- Standard syntax: "query { ..."
-        if (tokens[1].kind, tokens[2].kind) = ('NAME', 'BRACE_L') and tokens[1].content = 'query'
-            then tokens := tokens[3:];
-        end if;
+/*
+{   
+    fragment_1: {
+        "field1": # Field def,
+    }
+}
+*/
+declare
+    ix int;
+    fragments jsonb := '{}';
 
-        -- Simplified syntax for single queries: "{ ..."
-        if tokens[1].kind = 'BRACE_L'
-            then tokens := tokens[2:];
-        end if;
+begin
+    for ix in (select * from generate_series(1, array_length(tokens,1))) loop
+        if (
+            tokens[1].kind, tokens[1].content, tokens[2].kind,
+            tokens[3].kind, tokens[3].content, tokens[4].kind,
+            tokens[5].kind
+           ) = (
+            'NAME', 'fragment', 'NAME',
+            'NAME', 'on', 'NAME', 'BRACE_L'
+           ) then
 
-        return (select gql.parse_field(tokens)).contents;
-    end;
+            -- Make the fragemnt look like a field so we can parse it
+            fragments := fragments || (
+                gql.parse_field(
+                    -- Make the fragemnt look like a field so we can parse it
+                    ('NAME', '...' || tokens[2].content)::gql.token || tokens[5:]
+                )
+            ).contents; 
+
+        end if;
+        tokens := tokens[2:array_length(tokens,1)];
+        exit when tokens is null;
+    end loop;
+    return fragments; 
+end;
 $BODY$;
+
+
+
