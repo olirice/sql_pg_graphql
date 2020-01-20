@@ -276,14 +276,22 @@ $$ select _column_name
 $$ language sql immutable returns null on null input;
 
 
+create or replace function gql.to_gql_type(sql_type text, not_null bool) returns text as
+$$ select
+		case
+			when sql_type in ('integer', 'int4', 'smallint', 'serial') then 'Int'
+			when sql_type ilike 'date' then 'Datetime'
+			when sql_type ilike 'time%' then 'Datetime'
+			else 'String'
+		end || case
+			when not_null then '!' else '' end;
+$$ language sql immutable strict;
+
 
 create or replace function gql.to_gql_type(_table_schema text, _table_name text, _column_name text) returns text as $$
 	/* Assign a concrete graphql data type (non-connection) from a sql datatype e.g. 'int4' -> 'Integer!' */
-	select case
-		when sql_data_type in ('integer', 'int4', 'smallint', 'serial') then 'Int'
-		else 'String'
-
-	end || case when not_null then '!' else '' end gql_data_type
+	select 
+        gql.to_gql_type(sql_type := sql_data_type, not_null := not_null)
 	from
 		gql.column_info fm
 	where
@@ -291,16 +299,6 @@ create or replace function gql.to_gql_type(_table_schema text, _table_name text,
 		and fm.table_name = _table_name
 		and fm.column_name = _column_name
 $$ language sql stable returns null on null input;
-
-
-create or replace function gql.to_gql_type(sql_type text, not_null bool) returns text as
-$$ select
-		case
-			when sql_type in ('integer', 'int4', 'smallint', 'serial') then 'Int'
-			else 'String'
-		end || case
-			when not_null then '!' else '' end;
-$$ language sql immutable strict;
 
 
 create or replace function gql.relationship_to_gql_field_name(_constraint_name text) returns text
@@ -540,6 +538,11 @@ create or replace function gql.to_schema(_table_schema text) returns text as $$
     
 	select '
 scalar Cursor
+
+"""
+ISO 8601: https://en.wikipedia.org/wiki/ISO_8601
+"""
+scalar Datetime
 
 type PageInfo {
   hasNextPage: Boolean!
@@ -804,10 +807,12 @@ as $BODY$
     _name := tokens[1].content;
 
     
+    -- Handle Inline Fragments
+    -- Given that all pg_graphql endpoints only ever return one type, they are not yet supported
+    if (_name, tokens[1].content) = ('...', 'on') then
+            raise exception 'gql.parse_field: Inline query fragments are not necessary for this query %', tokens;
+    end if;
 
-    
-
-    -- Handle Fragments
     -- https://graphql.org/learn/queries/#fragments
     if _name = '...' then
         _name := _name || tokens[2].content;
@@ -947,6 +952,8 @@ as $BODY$
 $BODY$;
 
 
+
+
 create or replace function gql.parse_fragments(tokens gql.token[]) returns jsonb
     language plpgsql immutable strict parallel safe
 as $BODY$
@@ -1022,7 +1029,6 @@ Intended for unpacking query fragments on an AST
     CASE jsonb_typeof(obj)
         
         WHEN 'object' THEN
-          coalesce(
             gql.ast_recursive_merge(
                 (
                     SELECT
@@ -1044,9 +1050,7 @@ Intended for unpacking query fragments on an AST
                     WHEN obj ? search THEN substitute
                     ELSE '{}'
                 END
-            ),
-            '{}'::jsonb
-        )
+            )
         -- AST does not contain array types 
         -- WHEN 'array' THEN
 
@@ -1091,15 +1095,16 @@ $BODY$;
 
 
 CREATE or replace FUNCTION gql.ast_replace_value(ast jsonb, search jsonb, substitute jsonb) RETURNS jsonb
-STRICT LANGUAGE SQL AS $$
+STRICT LANGUAGE plpgsql AS $$
 /*
 Anywhere 'search' is found as a key, 'substitute' is unpacked in its place.
 Intended for unpacking query fragments on an AST
  */
-  SELECT
+ begin
+  return
     CASE jsonb_typeof(ast)
         WHEN 'object' THEN
-          coalesce((
+          (
             SELECT
                 jsonb_object_agg(
                     key,
@@ -1107,16 +1112,14 @@ Intended for unpacking query fragments on an AST
                 )
             FROM
                 jsonb_each(ast)
-            ),
-            '{}'::jsonb
-        )
+          )
         -- AST does not contain array types 
         -- WHEN 'array' THEN
         -- TODO(OR): A literal string argument passed as a 
         when 'string' then case when ast = search then substitute else ast end
         else ast
     end;
-
+end;
 $$;
 
 
@@ -1148,23 +1151,26 @@ $BODY$;
 
 
 create or replace function gql.to_bool(jsonb) returns bool
-language sql immutable as 
+language plpgsql immutable as 
 $$
-    select
+begin
+    return
         case
             when $1 = to_jsonb('true'::text) then true
             when $1 = to_jsonb('false'::text) then false
             when $1 = to_jsonb(true::bool) then true
             when $1 = to_jsonb(false::bool) then false
         end;
+end;
 $$;
 
 
 
 create or replace function gql.ast_is_skip(ast jsonb) returns bool
-language sql immutable as
+language plpgsql immutable as
 $$
-    select 
+begin
+    return
         case
             when (jsonb_typeof(ast) = 'object'
                     and ast ? 'fields'
@@ -1173,19 +1179,21 @@ $$
                     and ast ? 'skip'
                 ) then gql.to_bool(ast -> 'include') and not gql.to_bool(ast -> 'skip')
             else true
-        end
+        end;
+end;
 $$;
 
 
 CREATE or replace FUNCTION gql.ast_apply_directives(ast jsonb) RETURNS jsonb
-STRICT LANGUAGE SQL AS $$
+STRICT LANGUAGE plpgsql AS $$
+begin
 /*
 Skip fields where skip = true or include = false
  */
-  SELECT
+  return
     CASE 
         WHEN jsonb_typeof(ast) = 'object' THEN
-          coalesce((
+            (
             SELECT
                 jsonb_object_agg(
                     key,
@@ -1195,11 +1203,10 @@ Skip fields where skip = true or include = false
                 jsonb_each(ast)
             WHERE
                 gql.ast_is_skip(value)
-        ), 
-        '{}'::jsonb)
+            )
         else ast
     end;
-
+end;
 $$;
 
 
@@ -1523,7 +1530,10 @@ $body$
 			$$
             begin
 				return
-					%s(tab, field) -> coalesce(field->>\'alias\', field->>\'name\')
+                    jsonb_build_object(
+                        coalesce(field->>\'alias\', field->>\'name\'),
+					    %s(tab, field) -> coalesce(field->>\'alias\', field->>\'name\')
+                    )
 				from
 					%s.%s tab
 				where
@@ -1564,7 +1574,11 @@ $body$
 				as
 			$$
             begin
-				return %s(field) -> coalesce(field->>\'alias\', field->>\'name\');
+				return
+                    jsonb_build_object(
+                        coalesce(field->>\'alias\', field->>\'name\'),
+                        %s(field) -> coalesce(field->>\'alias\', field->>\'name\')
+                    );
             end;
 		   $$;', gql.to_resolver_name(gql.to_entrypoint_connection_name(tab_rec.table_name)),
 			   gql.to_resolver_name(gql.to_connection_name(tab_rec.table_name))
@@ -1680,15 +1694,15 @@ declare
 	edges jsonb := field #> \'{fields,edges}\';
 	node jsonb := edges #> \'{fields,node}\';
 
-	page_info_field_name text := coalesce(field #>> \'{fields,pageInfo,alias}\', field #>> \'{fields,pageInfo,name}\');
-	cursor_field_name text := coalesce(edges #>> \'{fields,cursor,alias}\', edges #>> \'{fields,cursor,name}\');
-	edges_field_name text := coalesce(edges ->> \'alias\', edges ->> \'name\');
-	node_field_name text := coalesce(edges #>> \'{fields,node,alias}\', edges #>> \'{fields,node,name}\');
+	page_info_field_name text := coalesce(field #>> \'{fields,pageInfo,alias}\', \'pageInfo\');
+	cursor_field_name text := coalesce(edges #>> \'{fields,cursor,alias}\', \'cursor\');
+    edges_field_name text := coalesce(edges ->> \'alias\', \'edges\');
+	node_field_name text := coalesce(edges #>> \'{fields,node,alias}\', \'node\');
 	next_page_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,hasNextPage,alias}\', \'hasNextPage\');
 	previous_page_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,hasPreviousPage,alias}\', \'hasPreviousPage\');
     start_cursor_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,startCursor,alias}\', \'startCursor\');
     end_cursor_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,endCursor,alias}\', \'endCursor\');
-	total_field_name text := coalesce(field #>> \'{fields,total_count,alias}\', field #>> \'{fields,total_count,name}\');
+	total_field_name text := coalesce(field #>> \'{fields,total_count,alias}\', \'total_count\');
 							   
 begin
 	-- Compute total
@@ -1720,7 +1734,7 @@ begin
 				-- Conditions
 				%s
 			order by
-				case when before_cursor is not null then %s end desc,
+				case when before_cursor is not null or arg_last is not null then %s end desc,
 				%s asc
 			limit
                 -- Retrieve extra row to check if there is another page
@@ -1740,7 +1754,7 @@ begin
             select 
                 case
                     -- If a cursor is provided, that row appears on the previous page
-                    when coalesce(before_cursor, after_cursor) is null then true
+                    when coalesce(before_cursor, after_cursor) is not null then true
                     -- If no cursor is provided, no previous page
                     else false
                 end val
@@ -2108,7 +2122,14 @@ as $BODY$
 declare
     ast jsonb;
     fragments jsonb := gql.parse_fragments(tokens);
+    ix int;
 begin
+
+    
+    ------------------------
+    ------- QUERIES --------
+    ------------------------
+
     -- Standard syntax: "query { ..."
     if (tokens[1].kind, tokens[2].kind) = ('NAME', 'BRACE_L') and tokens[1].content = 'query'
         then tokens := tokens[3:];
@@ -2118,6 +2139,24 @@ begin
     if tokens[1].kind = 'BRACE_L'
         then tokens := tokens[2:];
     end if;
+
+
+    -- Named Operation, possibly with variables
+    -- Ignore everything until the opening bracket. Query is already validated.
+    -- Ex: query GetPostById($post_nodeId: ID! = something)
+    if (tokens[1].kind, tokens[2].kind) = ('NAME', 'NAME') and tokens[1].content = 'query' then
+        for ix in select * from generate_series(1, array_length(tokens, 1)) loop
+            tokens := tokens[2:];
+            exit when tokens[1].kind = 'BRACE_L';
+        end loop;
+        tokens := tokens[2:];
+    end if;
+
+
+    ---------------------------------
+    --------- MUTATIONS -------------
+    ---------------------------------
+    -- TODO(OR)
 
     -- Parse request
     ast := (gql.parse_field(tokens)).contents;
@@ -2130,6 +2169,7 @@ begin
 
     -- Apply skip and include directives
     ast := gql.ast_apply_directives(ast); 
+
     return ast;
 end;
 $BODY$;

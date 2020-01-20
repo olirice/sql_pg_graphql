@@ -4,7 +4,14 @@ as $BODY$
 declare
     ast jsonb;
     fragments jsonb := gql.parse_fragments(tokens);
+    ix int;
 begin
+
+    
+    ------------------------
+    ------- QUERIES --------
+    ------------------------
+
     -- Standard syntax: "query { ..."
     if (tokens[1].kind, tokens[2].kind) = ('NAME', 'BRACE_L') and tokens[1].content = 'query'
         then tokens := tokens[3:];
@@ -14,6 +21,24 @@ begin
     if tokens[1].kind = 'BRACE_L'
         then tokens := tokens[2:];
     end if;
+
+
+    -- Named Operation, possibly with variables
+    -- Ignore everything until the opening bracket. Query is already validated.
+    -- Ex: query GetPostById($post_nodeId: ID! = something)
+    if (tokens[1].kind, tokens[2].kind) = ('NAME', 'NAME') and tokens[1].content = 'query' then
+        for ix in select * from generate_series(1, array_length(tokens, 1)) loop
+            tokens := tokens[2:];
+            exit when tokens[1].kind = 'BRACE_L';
+        end loop;
+        tokens := tokens[2:];
+    end if;
+
+
+    ---------------------------------
+    --------- MUTATIONS -------------
+    ---------------------------------
+    -- TODO(OR)
 
     -- Parse request
     ast := (gql.parse_field(tokens)).contents;
@@ -26,6 +51,7 @@ begin
 
     -- Apply skip and include directives
     ast := gql.ast_apply_directives(ast); 
+
     return ast;
 end;
 $BODY$;

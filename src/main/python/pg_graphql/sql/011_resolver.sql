@@ -158,7 +158,10 @@ $body$
 			$$
             begin
 				return
-					%s(tab, field) -> coalesce(field->>\'alias\', field->>\'name\')
+                    jsonb_build_object(
+                        coalesce(field->>\'alias\', field->>\'name\'),
+					    %s(tab, field) -> coalesce(field->>\'alias\', field->>\'name\')
+                    )
 				from
 					%s.%s tab
 				where
@@ -199,7 +202,11 @@ $body$
 				as
 			$$
             begin
-				return %s(field) -> coalesce(field->>\'alias\', field->>\'name\');
+				return
+                    jsonb_build_object(
+                        coalesce(field->>\'alias\', field->>\'name\'),
+                        %s(field) -> coalesce(field->>\'alias\', field->>\'name\')
+                    );
             end;
 		   $$;', gql.to_resolver_name(gql.to_entrypoint_connection_name(tab_rec.table_name)),
 			   gql.to_resolver_name(gql.to_connection_name(tab_rec.table_name))
@@ -315,15 +322,15 @@ declare
 	edges jsonb := field #> \'{fields,edges}\';
 	node jsonb := edges #> \'{fields,node}\';
 
-	page_info_field_name text := coalesce(field #>> \'{fields,pageInfo,alias}\', field #>> \'{fields,pageInfo,name}\');
-	cursor_field_name text := coalesce(edges #>> \'{fields,cursor,alias}\', edges #>> \'{fields,cursor,name}\');
-	edges_field_name text := coalesce(edges ->> \'alias\', edges ->> \'name\');
-	node_field_name text := coalesce(edges #>> \'{fields,node,alias}\', edges #>> \'{fields,node,name}\');
+	page_info_field_name text := coalesce(field #>> \'{fields,pageInfo,alias}\', \'pageInfo\');
+	cursor_field_name text := coalesce(edges #>> \'{fields,cursor,alias}\', \'cursor\');
+    edges_field_name text := coalesce(edges ->> \'alias\', \'edges\');
+	node_field_name text := coalesce(edges #>> \'{fields,node,alias}\', \'node\');
 	next_page_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,hasNextPage,alias}\', \'hasNextPage\');
 	previous_page_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,hasPreviousPage,alias}\', \'hasPreviousPage\');
     start_cursor_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,startCursor,alias}\', \'startCursor\');
     end_cursor_field_name text := coalesce(field #>> \'{fields,pageInfo,fields,endCursor,alias}\', \'endCursor\');
-	total_field_name text := coalesce(field #>> \'{fields,total_count,alias}\', field #>> \'{fields,total_count,name}\');
+	total_field_name text := coalesce(field #>> \'{fields,total_count,alias}\', \'total_count\');
 							   
 begin
 	-- Compute total
@@ -355,7 +362,7 @@ begin
 				-- Conditions
 				%s
 			order by
-				case when before_cursor is not null then %s end desc,
+				case when before_cursor is not null or arg_last is not null then %s end desc,
 				%s asc
 			limit
                 -- Retrieve extra row to check if there is another page
@@ -375,7 +382,7 @@ begin
             select 
                 case
                     -- If a cursor is provided, that row appears on the previous page
-                    when coalesce(before_cursor, after_cursor) is null then true
+                    when coalesce(before_cursor, after_cursor) is not null then true
                     -- If no cursor is provided, no previous page
                     else false
                 end val

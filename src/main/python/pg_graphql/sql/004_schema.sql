@@ -58,14 +58,22 @@ $$ select _column_name
 $$ language sql immutable returns null on null input;
 
 
+create or replace function gql.to_gql_type(sql_type text, not_null bool) returns text as
+$$ select
+		case
+			when sql_type in ('integer', 'int4', 'smallint', 'serial') then 'Int'
+			when sql_type ilike 'date' then 'Datetime'
+			when sql_type ilike 'time%' then 'Datetime'
+			else 'String'
+		end || case
+			when not_null then '!' else '' end;
+$$ language sql immutable strict;
+
 
 create or replace function gql.to_gql_type(_table_schema text, _table_name text, _column_name text) returns text as $$
 	/* Assign a concrete graphql data type (non-connection) from a sql datatype e.g. 'int4' -> 'Integer!' */
-	select case
-		when sql_data_type in ('integer', 'int4', 'smallint', 'serial') then 'Int'
-		else 'String'
-
-	end || case when not_null then '!' else '' end gql_data_type
+	select 
+        gql.to_gql_type(sql_type := sql_data_type, not_null := not_null)
 	from
 		gql.column_info fm
 	where
@@ -73,16 +81,6 @@ create or replace function gql.to_gql_type(_table_schema text, _table_name text,
 		and fm.table_name = _table_name
 		and fm.column_name = _column_name
 $$ language sql stable returns null on null input;
-
-
-create or replace function gql.to_gql_type(sql_type text, not_null bool) returns text as
-$$ select
-		case
-			when sql_type in ('integer', 'int4', 'smallint', 'serial') then 'Int'
-			else 'String'
-		end || case
-			when not_null then '!' else '' end;
-$$ language sql immutable strict;
 
 
 create or replace function gql.relationship_to_gql_field_name(_constraint_name text) returns text
@@ -322,6 +320,11 @@ create or replace function gql.to_schema(_table_schema text) returns text as $$
     
 	select '
 scalar Cursor
+
+"""
+ISO 8601: https://en.wikipedia.org/wiki/ISO_8601
+"""
+scalar Datetime
 
 type PageInfo {
   hasNextPage: Boolean!

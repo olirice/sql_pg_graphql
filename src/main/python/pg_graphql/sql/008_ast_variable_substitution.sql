@@ -1,13 +1,14 @@
 CREATE or replace FUNCTION gql.ast_replace_value(ast jsonb, search jsonb, substitute jsonb) RETURNS jsonb
-STRICT LANGUAGE SQL AS $$
+STRICT LANGUAGE plpgsql AS $$
 /*
 Anywhere 'search' is found as a key, 'substitute' is unpacked in its place.
 Intended for unpacking query fragments on an AST
  */
-  SELECT
+ begin
+  return
     CASE jsonb_typeof(ast)
         WHEN 'object' THEN
-          coalesce((
+          (
             SELECT
                 jsonb_object_agg(
                     key,
@@ -15,16 +16,14 @@ Intended for unpacking query fragments on an AST
                 )
             FROM
                 jsonb_each(ast)
-            ),
-            '{}'::jsonb
-        )
+          )
         -- AST does not contain array types 
         -- WHEN 'array' THEN
         -- TODO(OR): A literal string argument passed as a 
         when 'string' then case when ast = search then substitute else ast end
         else ast
     end;
-
+end;
 $$;
 
 

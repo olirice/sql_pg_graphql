@@ -28,7 +28,6 @@ Intended for unpacking query fragments on an AST
     CASE jsonb_typeof(obj)
         
         WHEN 'object' THEN
-          coalesce(
             gql.ast_recursive_merge(
                 (
                     SELECT
@@ -50,9 +49,7 @@ Intended for unpacking query fragments on an AST
                     WHEN obj ? search THEN substitute
                     ELSE '{}'
                 END
-            ),
-            '{}'::jsonb
-        )
+            )
         -- AST does not contain array types 
         -- WHEN 'array' THEN
 

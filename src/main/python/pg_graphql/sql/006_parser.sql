@@ -63,10 +63,12 @@ as $BODY$
     _name := tokens[1].content;
 
     
+    -- Handle Inline Fragments
+    -- Given that all pg_graphql endpoints only ever return one type, they are not yet supported
+    if (_name, tokens[1].content) = ('...', 'on') then
+            raise exception 'gql.parse_field: Inline query fragments are not necessary for this query %', tokens;
+    end if;
 
-    
-
-    -- Handle Fragments
     -- https://graphql.org/learn/queries/#fragments
     if _name = '...' then
         _name := _name || tokens[2].content;
@@ -204,6 +206,8 @@ as $BODY$
     );
     end;
 $BODY$;
+
+
 
 
 create or replace function gql.parse_fragments(tokens gql.token[]) returns jsonb

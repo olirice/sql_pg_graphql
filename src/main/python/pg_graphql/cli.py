@@ -120,7 +120,9 @@ def demo(connection):
     engine = create_engine(connection)
     con = engine.connect()
     with con.begin() as trans:
-        con.execute(sqla_text("""
+        con.execute(
+            sqla_text(
+                """
 select gql.drop_resolvers();
 
 drop table if exists post cascade;
@@ -157,12 +159,11 @@ insert into post(id, owner_id, title) values
 (10, 2, 'Post10');
 
 select gql.build_resolvers('public');
-"""))
+"""
+            )
+        )
         trans.commit()
     con.close()
     engine.dispose()
 
-
     engine.dispose()
-
-
